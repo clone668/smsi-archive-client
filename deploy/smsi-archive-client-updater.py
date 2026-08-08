@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import filecmp
 import shutil
 import signal
 import socket
@@ -87,6 +88,10 @@ def _activate(revision: str) -> None:
     if _busy():
         raise RuntimeError("归档任务正在运行，请完成后再安装更新")
     release = _validate_release(revision)
+    requirements = release / "requirements.txt"
+    live_requirements = INSTALL_DIR / "requirements.txt"
+    if live_requirements.is_file() and not filecmp.cmp(requirements, live_requirements, shallow=False):
+        raise RuntimeError("更新包含新的 Python 依赖，请先重新运行 Ubuntu 安装脚本")
     files = _release_files(release)
     if not files:
         raise RuntimeError("更新包没有可安装文件")
