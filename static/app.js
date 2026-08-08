@@ -11,6 +11,15 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
+  const icon = name => {
+    const paths = {
+      folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><path d="M3 9h18"/>',
+      file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h6"/>',
+      chevron: '<path d="m9 18 6-6-6-6"/>',
+      home: '<path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9M9 20v-6h6v6"/>',
+    };
+    return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
+  };
   const bytes = value => {
     let n = Number(value || 0);
     const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -373,26 +382,26 @@
     }
     if (scope === "remote") {
       body.innerHTML = entries.map(item => {
-        if (item.type === "directory") return `<tr><td><button class="folder-link" data-path="${escapeHtml(item.path)}">${escapeHtml(item.name)}/</button><span class="file-path">${Number(item.entry_count || 0)} 个对象</span></td><td>目录</td><td>--</td><td>--</td><td>--</td><td>--</td></tr>`;
+        if (item.type === "directory") return `<tr class="directory-row"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${Number(item.entry_count || 0)} 个对象</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>文件夹</td><td>--</td><td>--</td><td>--</td><td>--</td></tr>`;
         const local = localObjectStatus[item.local_state] || [item.local_state || "未知", ""];
         const type = [item.kind, item.table_name].filter(Boolean).join(" · ") || "归档对象";
-        return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
+        return `<tr><td><div class="file-entry"><span class="file-icon file">${icon("file")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
       }).join("");
-      return;
+    } else {
+      body.innerHTML = entries.map(item => {
+        if (item.type === "directory") return `<tr class="directory-row"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml((item.locations || [item.location]).join(" + "))}</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${escapeHtml((item.locations || [item.location]).join(" + "))}</td><td>--</td><td>--</td><td>--</td></tr>`;
+        const location = item.state === "downloading" ? ["下载中", "warn"] : item.location === "verified" ? ["已验证目录", "good"] : ["暂存目录", "warn"];
+        const remote = item.remote_state === "listed" ? ["已列入", "good"] : item.remote_state === "control" ? ["控制文件", ""] : ["仅本地", "warn"];
+        return `<tr><td><div class="file-entry"><span class="file-icon file">${icon("file")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
+      }).join("");
     }
-    body.innerHTML = entries.map(item => {
-      if (item.type === "directory") return `<tr><td><button class="folder-link" data-path="${escapeHtml(item.path)}">${escapeHtml(item.name)}/</button></td><td>${escapeHtml((item.locations || [item.location]).join(" + "))}</td><td>--</td><td>--</td><td>--</td></tr>`;
-      const location = item.state === "downloading" ? ["下载中", "warn"] : item.location === "verified" ? ["已验证目录", "good"] : ["暂存目录", "warn"];
-      const remote = item.remote_state === "listed" ? ["已列入", "good"] : item.remote_state === "control" ? ["控制文件", ""] : ["仅本地", "warn"];
-      return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
-    }).join("");
     $$(".folder-link", body).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
   }
 
   function renderFileBreadcrumbs(scope, path, parentPath) {
     const root = $(`#${scope}-breadcrumbs`);
     const parts = path ? path.split("/") : [];
-    const crumbs = ['<button class="breadcrumb" data-path="">归档根目录</button>'];
+    const crumbs = [`<button class="breadcrumb root-breadcrumb" data-path="">${icon("home")}<span>归档根目录</span></button>`];
     let current = "";
     parts.forEach(part => {
       current = current ? `${current}/${part}` : part;

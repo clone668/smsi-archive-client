@@ -149,11 +149,28 @@ tbody tr:hover { background: var(--surface-2); }
 .breadcrumb, .folder-link { padding: 2px 4px; border: 0; background: transparent; color: var(--brand-strong); font-weight: 700; }
 .breadcrumb:hover, .folder-link:hover { text-decoration: underline; }
 .breadcrumb-separator { color: var(--muted); }
-.folder-link { padding: 0; text-align: left; }
+.breadcrumb { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.folder-link { width: 100%; padding: 5px 6px; text-align: left; display: flex; align-items: center; gap: 10px; }
+.icon { width: 16px; height: 16px; flex: 0 0 auto; }
+.root-breadcrumb .icon { width: 15px; height: 15px; }
 .file-table-wrap { min-height: 240px; max-height: calc(100vh - 250px); overflow: auto; }
 .file-table thead { position: sticky; top: 0; z-index: 2; }
-.file-table td:first-child { max-width: 440px; white-space: normal; }
-.file-name { display: block; color: var(--text); font-weight: 650; overflow-wrap: anywhere; }
+.file-table { table-layout: fixed; }
+.file-table th:first-child { width: 42%; }
+.file-table th:nth-child(2) { width: 18%; }
+.file-table td:first-child { max-width: 520px; white-space: normal; }
+.file-table tbody tr { transition: background .14s ease; }
+.file-table tbody tr:hover { background: var(--surface-2); }
+.file-entry { min-height: 32px; display: flex; align-items: center; gap: 10px; }
+.file-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 6px; }
+.file-icon.folder { background: var(--warn-soft); color: var(--warn); }
+.file-icon.file { background: var(--brand-soft); color: var(--brand); }
+.file-icon .icon { width: 18px; height: 18px; }
+.file-entry-label { min-width: 0; display: grid; gap: 2px; }
+.file-entry-label strong { color: var(--text); font-weight: 700; overflow-wrap: anywhere; }
+.file-entry-label small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.file-chevron { margin-left: auto; color: var(--muted); display: grid; place-items: center; }
+.file-chevron .icon { width: 17px; height: 17px; }
 .file-path { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .hash { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
 
