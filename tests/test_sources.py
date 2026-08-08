@@ -34,6 +34,7 @@ def test_sftp_source_uses_fixed_host_key_and_read_only_root(_resolve) -> None:
     assert command[:3] == ["rclone", "lsf", ":sftp:/archive/collector=collector-a"]
     assert command[command.index("--sftp-host") + 1] == "192.168.2.240"
     assert "--sftp-known-hosts-file" in command
+    assert command[command.index("--sftp-host-key-algorithms") + 1] == "ssh-ed25519"
     assert "--sftp-disable-hashcheck" in command
     assert "--sftp-ask-password" not in command
 

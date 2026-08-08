@@ -47,7 +47,8 @@ install -d -o root -g root -m 0755 "${CHROOT_DIR}" "${CHROOT_ARCHIVE}"
 install -d -o root -g root -m 0755 "${AUTHORIZED_KEYS_DIR}"
 printf '%s\n' "${PUBLIC_KEY}" > "${AUTHORIZED_KEY_FILE}"
 chown root:root "${AUTHORIZED_KEY_FILE}"
-chmod 0600 "${AUTHORIZED_KEY_FILE}"
+# sshd 以目标用户身份读取该文件；公钥可读但仍只有 root 可以修改。
+chmod 0644 "${AUTHORIZED_KEY_FILE}"
 
 chgrp -R "${ARCHIVE_GROUP}" "${ARCHIVE_DIR}"
 chmod -R g+rX,o-rwx "${ARCHIVE_DIR}"
