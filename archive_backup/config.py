@@ -15,6 +15,7 @@ from werkzeug.security import generate_password_hash
 
 APP_NAME = "SMSIArchiveBackupClient"
 CONFIG_VERSION = 1
+MIN_PASSWORD_LENGTH = 6
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
 
@@ -256,8 +257,8 @@ class ConfigStore:
         return updated
 
     def change_password(self, password: str) -> ClientConfig:
-        if len(password) < 12:
-            raise ValueError("密码至少需要 12 个字符")
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise ValueError(f"密码至少需要 {MIN_PASSWORD_LENGTH} 个字符")
         config = self.load()
         config.password_hash = generate_password_hash(password)
         self.save(config)
@@ -270,7 +271,11 @@ class ConfigStore:
             config.session_secret = secrets.token_urlsafe(48)
         if not config.password_hash:
             supplied = os.getenv("SMSI_ARCHIVE_CLIENT_PASSWORD", "")
-            password = supplied if len(supplied) >= 12 else secrets.token_urlsafe(15)
+            password = (
+                supplied
+                if len(supplied) >= MIN_PASSWORD_LENGTH
+                else secrets.token_urlsafe(15)
+            )
             config.password_hash = generate_password_hash(password)
             if not supplied:
                 self.initial_password_path.write_text(password + "\n", encoding="utf-8")

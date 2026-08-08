@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from archive_backup.config import ClientConfig, ProfileConfig
+import pytest
+
+from archive_backup.config import ClientConfig, ConfigStore, ProfileConfig
 
 
 def test_verified_source_must_not_overlap_destination(tmp_path) -> None:
@@ -19,3 +21,11 @@ def test_verified_source_must_not_overlap_destination(tmp_path) -> None:
 def test_web_host_must_be_an_ip_address() -> None:
     config = ClientConfig(web_host="public.example.com")
     assert "Web 监听地址必须是有效 IP 地址" in config.validate()
+
+
+def test_password_minimum_is_six_characters(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    store.change_password("123456")
+    with pytest.raises(ValueError, match="至少需要 6 个字符"):
+        store.change_password("12345")
