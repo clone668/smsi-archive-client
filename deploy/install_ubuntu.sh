@@ -12,6 +12,7 @@ INSTALL_DIR="${DATA_ROOT}/smsi-archive-client"
 STATE_DIR="${DATA_ROOT}/smsi-archive-client-state"
 ARCHIVE_DIR="${DATA_ROOT}/smsi-archive"
 SERVICE_USER="smsi-archive"
+UPDATER_UNIT="smsi-archive-client-updater.service"
 
 command -v python3 >/dev/null || { echo "缺少 python3。" >&2; exit 1; }
 
@@ -28,6 +29,7 @@ if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
 fi
 
 install -d -m 0755 "${INSTALL_DIR}"
+install -d -m 0755 /usr/local/libexec
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0700 "${STATE_DIR}"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 "${ARCHIVE_DIR}"
 
@@ -40,6 +42,14 @@ python3 -m venv "${INSTALL_DIR}/.venv"
 "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
 "${INSTALL_DIR}/.venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"
 chown -R root:root "${INSTALL_DIR}"
+REVISION="${SMSI_ARCHIVE_CLIENT_REVISION:-}"
+if [[ -z "${REVISION}" ]] && command -v git >/dev/null 2>&1 && git -C "${SOURCE_DIR}" rev-parse --verify HEAD >/dev/null 2>&1; then
+  REVISION="$(git -C "${SOURCE_DIR}" rev-parse HEAD)"
+fi
+if [[ "${REVISION}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+  printf '%s\n' "${REVISION,,}" > "${INSTALL_DIR}/.smsi-release"
+  chmod 0644 "${INSTALL_DIR}/.smsi-release"
+fi
 
 cat > /etc/smsi-archive-client.env <<EOF
 SMSI_ARCHIVE_CLIENT_DATA=${STATE_DIR}
@@ -58,8 +68,11 @@ sed \
   "${SOURCE_DIR}/deploy/smsi-archive-client.service" \
   > /etc/systemd/system/smsi-archive-client.service
 chmod 0644 /etc/systemd/system/smsi-archive-client.service
+install -m 0755 "${SOURCE_DIR}/deploy/smsi-archive-client-updater.py" /usr/local/libexec/smsi-archive-client-updater.py
+install -m 0644 "${SOURCE_DIR}/deploy/${UPDATER_UNIT}" "/etc/systemd/system/${UPDATER_UNIT}"
 systemctl daemon-reload
 systemctl enable --now smsi-archive-client.service
+systemctl enable --now "${UPDATER_UNIT}"
 
 echo
 echo "安装完成：http://<Ubuntu局域网IP>:8788"

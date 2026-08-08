@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const state = { csrf: "", config: null, runtime: null, days: [], events: [], timer: null };
+  const state = { csrf: "", config: null, runtime: null, updates: null, days: [], events: [], timer: null };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
@@ -148,6 +148,81 @@
 
   function renderAll() { renderMetrics(); renderProfiles(); renderDays(); renderEvents(); }
 
+  function renderUpdates() {
+    const updates = state.updates || {};
+    const latest = updates.latest || {};
+    const check = $("#check-update");
+    const download = $("#download-update");
+    const restart = $("#restart-update");
+    const status = $("#update-status");
+    if (!check || !download || !restart || !status) return;
+    const current = String(updates.current_revision || "未知").slice(0, 12);
+    const remote = String(latest.revision || "").slice(0, 12);
+    const staged = String(updates.staged_revision || "").slice(0, 12);
+    if (staged) {
+      const busy = !!state.runtime?.running;
+      status.textContent = busy ? `已下载 ${staged}，归档任务完成后可重启 · 当前 ${current}` : `已下载 ${staged}，可安装并重启 · 当前 ${current}`;
+      status.className = "update-status ready";
+      download.classList.add("hidden");
+      restart.classList.remove("hidden");
+      restart.disabled = busy;
+    } else if (remote && updates.update_available) {
+      status.textContent = `发现新版本 ${remote} · 当前 ${current}`;
+      status.className = "update-status available";
+      download.classList.remove("hidden");
+      restart.classList.add("hidden");
+      restart.disabled = false;
+    } else if (remote) {
+      status.textContent = `已是最新版本 ${remote}`;
+      status.className = "update-status current";
+      download.classList.add("hidden");
+      restart.classList.add("hidden");
+      restart.disabled = false;
+    } else {
+      status.textContent = `当前版本 ${current} · 尚未检查`;
+      status.className = "update-status";
+      download.classList.add("hidden");
+      restart.classList.add("hidden");
+      restart.disabled = false;
+    }
+  }
+
+  async function checkUpdate() {
+    const button = $("#check-update");
+    button.disabled = true;
+    try {
+      const result = await api("/api/update/check");
+      state.updates = result.updates;
+      renderUpdates();
+      toast(result.updates.update_available ? "发现新版本" : "当前已是最新版本");
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  }
+
+  async function downloadUpdate() {
+    const revision = state.updates?.latest?.revision;
+    if (!revision) return toast("请先检查更新", true);
+    const button = $("#download-update");
+    button.disabled = true;
+    try {
+      const result = await api("/api/update/download", { method: "POST", body: JSON.stringify({ revision }) });
+      state.updates = result.updates;
+      renderUpdates();
+      toast("更新包已下载，归档任务空闲后可安装并重启");
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  }
+
+  async function restartUpdate() {
+    if (!window.confirm("仅在归档任务空闲时安装更新并重启客户端，继续吗？")) return;
+    const button = $("#restart-update");
+    button.disabled = true;
+    try {
+      await api("/api/update/restart", { method: "POST", body: "{}" });
+      toast("更新已切换，客户端正在重启");
+    } catch (error) { toast(error.message, true); button.disabled = false; }
+  }
+
   function profileTemplate(profile, index) {
     const sourceType = profile.source_type || "google_drive";
     return `<article class="profile-edit" data-index="${index}">
@@ -242,7 +317,7 @@
   async function refresh() {
     try {
       const result = await api("/api/status");
-      state.runtime = result.runtime; state.days = result.days; state.events = result.events; renderAll();
+      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.events = result.events; renderAll(); renderUpdates();
     } catch (error) {
       $("#connection-state").textContent = "连接中断"; $("#connection-state").className = "status-dot bad";
     }
@@ -250,8 +325,8 @@
 
   async function bootstrap() {
     const result = await api("/api/bootstrap");
-    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.days = result.days; state.events = result.events;
-    renderAll(); populateSettings();
+    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.events = result.events;
+    renderAll(); renderUpdates(); populateSettings();
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);
   }
@@ -263,6 +338,9 @@
   $("#scan-only").addEventListener("click", () => runScan(false));
   $("#scan-download").addEventListener("click", () => runScan(true));
   $("#cancel-task").addEventListener("click", async () => { try { await api("/api/actions/cancel", { method: "POST", body: "{}" }); toast("已请求取消任务"); } catch (error) { toast(error.message, true); } });
+  $("#check-update").addEventListener("click", checkUpdate);
+  $("#download-update").addEventListener("click", downloadUpdate);
+  $("#restart-update").addEventListener("click", restartUpdate);
   $("#save-settings").addEventListener("click", saveSettings);
   $("#add-profile").addEventListener("click", () => {
     const used = new Set(state.config.profiles.map(item => item.profile_id)); let counter = 1; while (used.has(`collector-${counter}`)) counter += 1;

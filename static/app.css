@@ -114,6 +114,11 @@ tbody tr:hover { background: var(--surface-2); }
 .state-pill.warn { background: var(--warn-soft); color: var(--warn); }
 .state-pill.bad { background: var(--bad-soft); color: var(--bad); }
 .row-progress-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.update-controls { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.update-status { color: var(--muted); white-space: nowrap; }
+.update-status.available { color: var(--accent); }
+.update-status.ready { color: var(--good); }
+.update-status.current { color: var(--good); }
 .state-text.good { color: var(--good); }
 .state-text.warn { color: var(--warn); }
 .state-text.bad { color: var(--bad); }

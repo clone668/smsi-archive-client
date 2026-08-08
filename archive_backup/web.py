@@ -16,6 +16,7 @@ from .config import CONFIG_VERSION, ClientConfig, ConfigStore
 from .database import StateDatabase
 from .manager import ArchiveManager
 from .service import ArchiveService
+from .updates import UpdateManager
 
 
 def create_app(store: ConfigStore | None = None) -> Flask:
@@ -38,9 +39,11 @@ def create_app(store: ConfigStore | None = None) -> Flask:
     service = ArchiveService(config_store, database)
     service.start()
     atexit.register(service.stop)
+    updater = UpdateManager(config_store.root, root)
     app.extensions["smsi_config_store"] = config_store
     app.extensions["smsi_database"] = database
     app.extensions["smsi_archive_service"] = service
+    app.extensions["smsi_update_manager"] = updater
 
     attempts: dict[str, list[float]] = {}
     attempt_lock = threading.Lock()
@@ -133,6 +136,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "csrf": ensure_csrf(),
             "config": current.public_dict(),
             "runtime": service.status(),
+            "updates": updater.status(),
             "days": database.days(1000),
             "events": database.events(100),
             "initial_password_pending": config_store.initial_password_path.exists(),
@@ -143,6 +147,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
         return jsonify({
             "ok": True,
             "runtime": service.status(),
+            "updates": updater.status(),
             "days": database.days(1000),
             "events": database.events(100),
         })
@@ -159,6 +164,27 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "ok": True,
             "detail": database_manager.day_detail(profile_id, archive_date),
         })
+
+    @app.get("/api/update/check")
+    def api_update_check():
+        return jsonify({"ok": True, "updates": updater.check()})
+
+    @app.post("/api/update/download")
+    def api_update_download():
+        payload = request.get_json(silent=True) or {}
+        revision = str(payload.get("revision") or "").strip()
+        if not revision:
+            raise ValueError("缺少目标版本")
+        result = updater.download(revision)
+        database.event("info", "更新包已下载", detail=revision)
+        return jsonify({"ok": True, "result": result, "updates": updater.status()})
+
+    @app.post("/api/update/restart")
+    def api_update_restart():
+        if service.status().get("running"):
+            raise RuntimeError("归档任务正在运行，请完成后再重启客户端")
+        result = updater.restart()
+        return jsonify({"ok": True, "result": result})
 
     @app.put("/api/config")
     def api_config():
