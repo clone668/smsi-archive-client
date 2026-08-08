@@ -182,13 +182,14 @@ def create_app(store: ConfigStore | None = None) -> Flask:
         profile_id = str(request.args.get("profile_id") or "").strip()
         archive_date = str(request.args.get("archive_date") or "").strip()
         scope = str(request.args.get("scope") or "").strip()
+        path = str(request.args.get("path") or "").strip()
         if not profile_id or not archive_date or not scope:
             raise ValueError("缺少文件浏览参数")
         manager = ArchiveManager(config_store.load(), database)
         return jsonify({
             "ok": True,
             "result": manager.browse_files(
-                profile_id, archive_date, scope=scope
+                profile_id, archive_date, scope=scope, path=path
             ),
         })
 

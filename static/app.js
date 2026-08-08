@@ -4,8 +4,8 @@
     csrf: "", config: null, runtime: null, updates: null, days: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
-      remote: { request: 0 },
-      local: { request: 0 },
+      remote: { request: 0, path: "" },
+      local: { request: 0, path: "" },
     },
   };
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -302,6 +302,7 @@
   }
 
   function clearFileBrowser(scope, message) {
+    $(`#${scope}-breadcrumbs`).innerHTML = "";
     const dateSelect = $(`#${scope}-date`);
     dateSelect.innerHTML = '<option value="">暂无日期</option>';
     dateSelect.disabled = true;
@@ -314,6 +315,7 @@
     const profileId = $(`#${scope}-profile`).value;
     if (!profileId) return clearFileBrowser(scope, "请先在设置中添加采集服务器");
     const request = ++state.fileBrowsers[scope].request;
+    state.fileBrowsers[scope].path = "";
     clearFileBrowser(scope, scope === "remote" ? "正在读取网盘日期..." : "正在读取本地日期...");
     try {
       const query = new URLSearchParams({ profile_id: profileId, scope });
@@ -333,10 +335,12 @@
     }
   }
 
-  async function loadFileList(scope) {
+  async function loadFileList(scope, requestedPath = null) {
     const profileId = $(`#${scope}-profile`).value;
     const archiveDate = $(`#${scope}-date`).value;
     if (!profileId || !archiveDate) return;
+    const path = requestedPath === null ? state.fileBrowsers[scope].path : requestedPath;
+    state.fileBrowsers[scope].path = path || "";
     const request = ++state.fileBrowsers[scope].request;
     const columns = scope === "remote" ? 6 : 5;
     const body = $(`#${scope}-files-body`);
@@ -344,6 +348,7 @@
     $(`#${scope}-summary`).textContent = `正在读取 ${archiveDate}...`;
     try {
       const query = new URLSearchParams({ profile_id: profileId, archive_date: archiveDate, scope });
+      if (path) query.set("path", path);
       const payload = await api(`/api/files/list?${query}`);
       if (request !== state.fileBrowsers[scope].request) return;
       renderFileList(scope, payload.result);
@@ -355,28 +360,47 @@
   }
 
   function renderFileList(scope, result) {
-    const files = result.files || [];
+    const entries = result.entries || [];
+    state.fileBrowsers[scope].path = result.path || "";
     const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
-    $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.object_count || 0)} 个文件</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
+    renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "");
+    $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.entry_count || 0)} 项</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
     const body = $(`#${scope}-files-body`);
-    if (!files.length) {
+    if (!entries.length) {
       const columns = scope === "remote" ? 6 : 5;
-      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">该日期没有可显示的文件</td></tr>`;
+      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">当前目录没有可显示的文件</td></tr>`;
       return;
     }
     if (scope === "remote") {
-      body.innerHTML = files.map(item => {
+      body.innerHTML = entries.map(item => {
+        if (item.type === "directory") return `<tr><td><button class="folder-link" data-path="${escapeHtml(item.path)}">${escapeHtml(item.name)}/</button><span class="file-path">${Number(item.entry_count || 0)} 个对象</span></td><td>目录</td><td>--</td><td>--</td><td>--</td><td>--</td></tr>`;
         const local = localObjectStatus[item.local_state] || [item.local_state || "未知", ""];
         const type = [item.kind, item.table_name].filter(Boolean).join(" · ") || "归档对象";
         return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
       }).join("");
       return;
     }
-    body.innerHTML = files.map(item => {
+    body.innerHTML = entries.map(item => {
+      if (item.type === "directory") return `<tr><td><button class="folder-link" data-path="${escapeHtml(item.path)}">${escapeHtml(item.name)}/</button></td><td>${escapeHtml((item.locations || [item.location]).join(" + "))}</td><td>--</td><td>--</td><td>--</td></tr>`;
       const location = item.state === "downloading" ? ["下载中", "warn"] : item.location === "verified" ? ["已验证目录", "good"] : ["暂存目录", "warn"];
       const remote = item.remote_state === "listed" ? ["已列入", "good"] : item.remote_state === "control" ? ["控制文件", ""] : ["仅本地", "warn"];
       return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
     }).join("");
+    $$(".folder-link", body).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
+  }
+
+  function renderFileBreadcrumbs(scope, path, parentPath) {
+    const root = $(`#${scope}-breadcrumbs`);
+    const parts = path ? path.split("/") : [];
+    const crumbs = ['<button class="breadcrumb" data-path="">归档根目录</button>'];
+    let current = "";
+    parts.forEach(part => {
+      current = current ? `${current}/${part}` : part;
+      crumbs.push(`<span class="breadcrumb-separator">/</span><button class="breadcrumb" data-path="${escapeHtml(current)}">${escapeHtml(part)}</button>`);
+    });
+    root.innerHTML = crumbs.join("");
+    $$(".breadcrumb", root).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
+    if (path && parentPath === path) root.dataset.invalid = "true";
   }
 
   function profileTemplate(profile, index) {
@@ -504,7 +528,10 @@
   }));
   for (const scope of ["remote", "local"]) {
     $(`#${scope}-profile`).addEventListener("change", () => loadFileDates(scope));
-    $(`#${scope}-date`).addEventListener("change", () => loadFileList(scope));
+    $(`#${scope}-date`).addEventListener("change", () => {
+      state.fileBrowsers[scope].path = "";
+      loadFileList(scope, "");
+    });
     $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope));
   }
   $("#scan-only").addEventListener("click", () => runScan(false));

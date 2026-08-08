@@ -260,9 +260,17 @@ def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -
 
     assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
     assert result["state"] == "ready"
-    assert result["object_count"] == 1
-    assert result["files"][0]["path"] == fixture["relative_key"]
-    assert result["files"][0]["local_state"] == "missing"
+    assert result["entry_count"] == 1
+    assert result["entries"][0]["type"] == "directory"
+    nested = manager.browse_files(
+        profile.profile_id,
+        fixture["archive_date"],
+        scope="remote",
+        path="business/table=price_data/day",
+    )
+    assert nested["object_count"] == 1
+    assert nested["files"][0]["path"] == "business/table=price_data/day/part-00000.parquet"
+    assert nested["files"][0]["local_state"] == "missing"
 
 
 def test_local_file_browser_does_not_access_remote(
@@ -288,6 +296,13 @@ def test_local_file_browser_does_not_access_remote(
     )
 
     assert dates["dates"][0]["partial"] is True
-    assert result["object_count"] == 2
-    assert any(item["state"] == "downloading" for item in result["files"])
+    assert result["entry_count"] == 2
+    assert result["object_count"] == 1
+    nested = manager.browse_files(
+        profile.profile_id,
+        fixture["archive_date"],
+        scope="local",
+        path="business/table=price_data/day",
+    )
+    assert any(item["state"] == "downloading" for item in nested["files"])
     assert any(item["remote_state"] == "control" for item in result["files"])

@@ -678,8 +678,9 @@ class ArchiveManager:
         archive_date: str,
         *,
         scope: str,
+        path: str = "",
     ) -> dict[str, Any]:
-        """Browse one date's remote manifest or actual local files."""
+        """Browse one directory level without recursively enumerating children."""
         if scope not in {"remote", "local"}:
             raise RuntimeError("文件范围无效")
         profile = next(
@@ -692,6 +693,17 @@ class ArchiveManager:
             date.fromisoformat(archive_date)
         except ValueError as exc:
             raise RuntimeError("归档日期无效") from exc
+        directory = str(path or "").strip("/")
+        if directory:
+            directory_path = PurePosixPath(directory)
+            if (
+                directory_path.is_absolute()
+                or ".." in directory_path.parts
+                or "." in directory_path.parts
+                or "\\" in directory
+            ):
+                raise RuntimeError("浏览目录路径无效")
+            directory = directory_path.as_posix()
         final = self.final_root(profile, archive_date)
         stage = self.staging_root(profile, archive_date)
         if scope == "remote":
@@ -699,10 +711,29 @@ class ArchiveManager:
             snapshot, remote_state, remote_detail = self._remote_snapshot(
                 source, profile, archive_date
             )
-            files: list[dict[str, Any]] = []
+            entries: dict[str, dict[str, Any]] = {}
             if snapshot is not None:
+                prefix = f"date={archive_date}/"
                 for item in snapshot.objects:
                     key = str(item["relative_key"])
+                    relative = key.removeprefix(prefix)
+                    if directory:
+                        if not relative.startswith(directory + "/"):
+                            continue
+                        remainder = relative[len(directory) + 1 :]
+                    else:
+                        remainder = relative
+                    if not remainder:
+                        continue
+                    first, separator, _rest = remainder.partition("/")
+                    child_path = f"{directory}/{first}" if directory else first
+                    if separator:
+                        entry = entries.setdefault(
+                            child_path,
+                            {"type": "directory", "path": child_path, "name": first, "entry_count": 0},
+                        )
+                        entry["entry_count"] += 1
+                        continue
                     local_path = local_object_path(final, key, archive_date)
                     staged_path = local_object_path(stage, key, archive_date)
                     expected_size = int(item["size_bytes"])
@@ -724,25 +755,36 @@ class ArchiveManager:
                         local_state = "downloading"
                     else:
                         local_state = "missing"
-                    files.append({
-                        "path": key,
-                        "name": PurePosixPath(key).name,
+                    entries[child_path] = {
+                        "type": "file", "path": child_path, "name": first,
                         "size_bytes": expected_size,
                         "row_count": int(item.get("row_count") or 0),
                         "kind": str(item.get("kind") or ""),
                         "table_name": str(item.get("table_name") or ""),
                         "sha256": str(item.get("sha256") or ""),
                         "local_state": local_state,
-                    })
+                    }
+            ordered = sorted(
+                entries.values(),
+                key=lambda item: (item["type"] != "directory", str(item["name"]).casefold()),
+            )
+            files = [item for item in ordered if item["type"] == "file"]
             return {
                 "scope": scope,
                 "profile_id": profile_id,
                 "archive_date": archive_date,
+                "path": directory,
+                "parent_path": "/".join(PurePosixPath(directory).parts[:-1]) if directory else "",
                 "state": "ready" if snapshot is not None else remote_state,
                 "detail": remote_detail,
+                "entry_count": len(ordered),
                 "object_count": len(files),
                 "bytes_total": sum(int(item["size_bytes"]) for item in files),
-                "row_count": snapshot.row_count if snapshot else 0,
+                "row_count": sum(int(item.get("row_count") or 0) for item in files),
+                "total_object_count": snapshot.object_count if snapshot else 0,
+                "total_bytes": sum(int(item["size_bytes"]) for item in snapshot.objects) if snapshot else 0,
+                "total_row_count": snapshot.row_count if snapshot else 0,
+                "entries": ordered,
                 "files": files,
             }
 
@@ -772,14 +814,19 @@ class ArchiveManager:
             ".smsi-verified.json",
             ".smsi-verification-failed.json",
         }
-        files = []
+        entries: dict[str, dict[str, Any]] = {}
         for location, root in (("verified", final), ("partial", stage)):
-            if not root.is_dir():
+            current_root = root / Path(*PurePosixPath(directory).parts) if directory else root
+            if not current_root.is_dir():
                 continue
-            for path in sorted(root.rglob("*")):
+            try:
+                current_root.resolve().relative_to(root.resolve())
+            except ValueError as exc:
+                raise RuntimeError("浏览目录路径越界") from exc
+            for path in sorted(current_root.iterdir(), key=lambda item: item.name.casefold()):
                 if not path.is_file() or path.is_symlink():
                     continue
-                if len(files) >= 5000:
+                if len(entries) >= 5000:
                     raise RuntimeError("本地文件超过 5000 个，请缩小浏览范围")
                 relative = path.relative_to(root).as_posix()
                 file_state = "downloading" if path.name.endswith(".downloading") else location
@@ -789,35 +836,58 @@ class ArchiveManager:
                     else relative
                 )
                 item = expected.get(manifest_relative) or {}
-                files.append({
-                    "path": relative,
-                    "name": path.name,
+                entry = entries.get(relative)
+                if entry is not None:
+                    entry["locations"].append(location)
+                    if location == "verified":
+                        entry.update({"location": location, "state": file_state})
+                    continue
+                entries[relative] = {
+                    "type": "file", "path": relative, "name": path.name,
                     "size_bytes": path.stat().st_size,
-                    "modified_at": datetime.fromtimestamp(
-                        path.stat().st_mtime, timezone.utc
-                    ).isoformat().replace("+00:00", "Z"),
-                    "location": location,
-                    "state": file_state,
+                    "modified_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "location": location, "locations": [location], "state": file_state,
                     "remote_state": (
                         "listed" if item
-                        else "control" if relative in control_files
+                        else "control" if manifest_relative in control_files
                         else "local_only"
                     ),
                     "expected_size": int(item.get("size_bytes") or 0),
-                })
+                }
+            for path in sorted(current_root.iterdir(), key=lambda item: item.name.casefold()):
+                if not path.is_dir() or path.is_symlink():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                entry = entries.get(relative)
+                if entry is None:
+                    entries[relative] = {
+                        "type": "directory", "path": relative, "name": path.name,
+                        "location": location, "locations": [location], "entry_count": 0,
+                    }
+                elif location not in entry["locations"]:
+                    entry["locations"].append(location)
+        ordered = sorted(
+            entries.values(),
+            key=lambda item: (item["type"] != "directory", str(item["name"]).casefold()),
+        )
+        files = [item for item in ordered if item["type"] == "file"]
         return {
             "scope": scope,
             "profile_id": profile_id,
             "archive_date": archive_date,
+            "path": directory,
+            "parent_path": "/".join(PurePosixPath(directory).parts[:-1]) if directory else "",
             "state": str((self.database.day(profile_id, archive_date) or {}).get("status") or "unknown"),
             "detail": (
                 f"本地 manifest 无法解析: {manifest_error}"
                 if manifest_error and local_snapshot is None
                 else "本地已验证目录与暂存目录"
             ),
+            "entry_count": len(ordered),
             "object_count": len(files),
             "bytes_total": sum(int(item["size_bytes"]) for item in files),
             "row_count": local_snapshot.row_count if local_snapshot else 0,
+            "entries": ordered,
             "files": files,
         }
 

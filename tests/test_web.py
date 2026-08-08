@@ -128,6 +128,7 @@ def test_file_browser_endpoints_require_scope_and_return_inventory(
         ).get_json()["result"]
         assert dates["scope"] == "remote"
         assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
-        assert files["object_count"] == 1
+        assert files["entry_count"] == 1
+        assert files["entries"][0]["type"] == "directory"
     finally:
         app.extensions["smsi_archive_service"].stop()
