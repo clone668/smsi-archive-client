@@ -226,7 +226,6 @@ class RcloneSftpSource(RcloneSource):
             "--sftp-user", self.profile.sftp_user,
             "--sftp-key-file", str(Path(self.profile.sftp_key_file).expanduser()),
             "--sftp-known-hosts-file", str(Path(self.profile.sftp_known_hosts_file).expanduser()),
-            "--sftp-host-key-algorithms", "ssh-ed25519",
             "--sftp-disable-hashcheck",
         ]
 
