@@ -118,6 +118,7 @@
 
         <section class="content-band update-workflow">
           <div class="section-heading"><div><h2>更新流程</h2><p>检查版本、下载校验、手动重启</p></div><span id="update-state" class="state-pill">未检查</span></div>
+          <div id="update-blocked-reason" class="workflow-notice hidden" role="status" aria-live="polite"></div>
           <div class="update-actions" aria-label="客户端更新操作">
             <div class="update-step"><span class="step-number">1</span><div><strong>检查版本</strong><small>只读取 GitHub 版本信息</small></div><button id="check-update" class="button secondary">检查更新</button></div>
             <div class="update-step"><span class="step-number">2</span><div><strong>下载并校验</strong><small>不会替换正在运行的代码</small></div><button id="download-update" class="button primary" disabled>开始更新</button></div>

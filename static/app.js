@@ -43,6 +43,9 @@
     idle: "等待操作", checking: "正在检查版本", downloading: "正在下载更新包",
     verifying: "正在校验更新包", ready: "更新已准备", failed: "更新失败",
   };
+  const archivePhaseMap = {
+    downloading: "正在下载归档", verifying: "正在校验归档", cancelled: "归档已取消",
+  };
   let toastTimer;
 
   function toast(message, error = false) {
@@ -214,6 +217,27 @@
     $("#check-update").disabled = active;
     $("#download-update").disabled = active || !updates.update_available || !!staged;
     $("#restart-update").disabled = active || !staged || archiveBusy || !updates.helper_available;
+    const blockedReason = $("#update-blocked-reason");
+    if (staged && archiveBusy) {
+      const progress = state.runtime?.progress || {};
+      const archivePhase = archivePhaseMap[progress.phase] || "归档任务正在运行";
+      const objects = progress.object_count ? ` · ${Number(progress.objects_done || 0)}/${Number(progress.object_count)} 个对象` : "";
+      blockedReason.textContent = `${archivePhase}${objects}；归档完成后才能重启客户端，避免中断校验。`;
+      blockedReason.className = "workflow-notice warn";
+      $("#restart-update").title = "归档任务运行中，完成后才允许重启";
+    } else if (staged && !active && updates.helper_available) {
+      blockedReason.textContent = "更新包已下载并校验，可以重启客户端。";
+      blockedReason.className = "workflow-notice good";
+      $("#restart-update").title = "切换已校验的更新包并重启客户端";
+    } else if (staged && !updates.helper_available) {
+      blockedReason.textContent = "更新助手不可用，暂时不能切换版本。";
+      blockedReason.className = "workflow-notice bad";
+      $("#restart-update").title = "更新助手不可用";
+    } else {
+      blockedReason.textContent = "";
+      blockedReason.className = "workflow-notice hidden";
+      $("#restart-update").title = "";
+    }
     $("#restart-hint").textContent = !updates.helper_available
       ? "Ubuntu 更新助手不可用"
       : archiveBusy && staged

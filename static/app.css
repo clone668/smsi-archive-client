@@ -176,6 +176,10 @@ tbody tr:hover { background: var(--surface-2); }
 
 .update-version-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .update-workflow { overflow: visible; }
+.workflow-notice { margin: 12px 14px 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 650; }
+.workflow-notice.good { border-color: var(--good); background: var(--good-soft); color: var(--good); }
+.workflow-notice.warn { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.workflow-notice.bad { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
 .update-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
 .update-step { min-height: 94px; padding: 14px; border-right: 1px solid var(--line); display: grid; grid-template-columns: 28px minmax(0, 1fr); grid-template-rows: auto auto; align-items: start; gap: 3px 10px; }
 .update-step:last-child { border-right: 0; }
