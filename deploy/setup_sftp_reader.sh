@@ -43,7 +43,15 @@ fi
 # "*" 不能用于密码登录，但不会让 sshd 在公钥认证前判定账号已锁定。
 usermod --password '*' "${READER_USER}"
 
-install -d -o root -g root -m 0755 "${CHROOT_DIR}" "${CHROOT_ARCHIVE}"
+install -d -o root -g root -m 0755 "${CHROOT_DIR}"
+if mountpoint -q "${CHROOT_ARCHIVE}"; then
+  if [[ "$(stat -c '%d:%i' "${CHROOT_ARCHIVE}")" != "$(stat -c '%d:%i' "${ARCHIVE_DIR}")" ]]; then
+    echo "挂载点已被其他来源占用: ${CHROOT_ARCHIVE}" >&2
+    exit 1
+  fi
+else
+  install -d -o root -g root -m 0755 "${CHROOT_ARCHIVE}"
+fi
 install -d -o root -g root -m 0755 "${AUTHORIZED_KEYS_DIR}"
 printf '%s\n' "${PUBLIC_KEY}" > "${AUTHORIZED_KEY_FILE}"
 chown root:root "${AUTHORIZED_KEY_FILE}"
@@ -54,10 +62,7 @@ chgrp -R "${ARCHIVE_GROUP}" "${ARCHIVE_DIR}"
 chmod -R g+rX,o-rwx "${ARCHIVE_DIR}"
 
 if mountpoint -q "${CHROOT_ARCHIVE}"; then
-  if [[ "$(stat -c '%d:%i' "${CHROOT_ARCHIVE}")" != "$(stat -c '%d:%i' "${ARCHIVE_DIR}")" ]]; then
-    echo "挂载点已被其他来源占用: ${CHROOT_ARCHIVE}" >&2
-    exit 1
-  fi
+  :
 else
   mount --bind "${ARCHIVE_DIR}" "${CHROOT_ARCHIVE}"
 fi
