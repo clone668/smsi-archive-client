@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+initial-password.txt
+config.json
+state.sqlite3*
+.partial/
+.quarantine/

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>登录 · SMSI 归档备份</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="login-panel">
+      <div class="brand-mark">S</div>
+      <p class="eyebrow">SMSI</p>
+      <h1>归档备份客户端</h1>
+      <form method="post" class="login-form">
+        <label for="password">登录密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+        {% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+        <button type="submit" class="button primary wide">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

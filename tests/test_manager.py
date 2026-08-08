@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from archive_backup.config import ClientConfig, ProfileConfig
+from archive_backup.database import StateDatabase
+from archive_backup.manager import ArchiveManager
+from archive_backup.protocol import parse_manifest
+from archive_backup.sources import VerifiedDirectorySource
+
+
+def make_config(tmp_path: Path, source_root: Path) -> tuple[ClientConfig, ProfileConfig]:
+    profile = ProfileConfig(
+        profile_id="collector-a",
+        display_name="Collector A",
+        collector_id="collector-a",
+        source_type="verified_directory",
+        verified_source_root=str(source_root),
+    )
+    config = ClientConfig(
+        local_root=str(tmp_path / "local"),
+        minimum_free_bytes=1024**3,
+        history_days=3650,
+        profiles=[profile],
+    )
+    return config, profile
+
+
+def test_verified_directory_downloads_and_publishes_atomically(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+
+    result = manager.scan_profile(profile, download=True)
+
+    assert result["failed"] == 0
+    final = Path(config.local_root) / "collector=collector-a" / "date=2026-08-07"
+    assert (final / ".smsi-verified.json").is_file()
+    assert (final / "manifest.json").read_bytes() == fixture["manifest_raw"]
+    target = final / "business" / "table=price_data" / "day" / "part-00000.parquet"
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == fixture["manifest"]["objects"][0]["sha256"]
+    assert database.day("collector-a", "2026-08-07")["status"] == "verified"
+
+
+def test_verified_directory_ignores_unverified_source_day(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    (fixture["day_root"] / ".smsi-verified.json").unlink()
+    source = VerifiedDirectorySource(ProfileConfig(
+        profile_id="collector-a", display_name="A", collector_id="collector-a",
+        source_type="verified_directory", verified_source_root=str(fixture["source_root"]),
+    ))
+    assert source.list_dates() == set()
+
+
+def test_verified_directory_rejects_receipt_for_different_manifest(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    receipt_path = fixture["day_root"] / ".smsi-verified.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["manifest_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    source = VerifiedDirectorySource(ProfileConfig(
+        profile_id="collector-a", display_name="A", collector_id="collector-a",
+        source_type="verified_directory", verified_source_root=str(fixture["source_root"]),
+    ))
+    assert source.list_dates() == set()
+
+
+def test_manifest_change_does_not_overwrite_verified_day(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    final = manager.final_root(profile, fixture["archive_date"])
+    original = (final / "manifest.json").read_bytes()
+
+    changed = dict(fixture["manifest"])
+    changed["generated_at"] = "later"
+    changed_raw = json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
+    (fixture["day_root"] / "manifest.json").write_bytes(changed_raw)
+    source_receipt_path = fixture["day_root"] / ".smsi-verified.json"
+    source_receipt = json.loads(source_receipt_path.read_text(encoding="utf-8"))
+    source_receipt["manifest_sha256"] = hashlib.sha256(changed_raw).hexdigest()
+    source_receipt_path.write_text(json.dumps(source_receipt), encoding="utf-8")
+    manager.scan_profile(profile, download=True)
+
+    assert (final / "manifest.json").read_bytes() == original
+    row = database.day("collector-a", fixture["archive_date"])
+    assert row["status"] == "manifest_changed"
+
+
+class RunningSource:
+    name = "test"
+
+    def read_small(self, relative_key: str, maximum_bytes: int):
+        if relative_key.endswith("_smsi-archive-progress.json"):
+            return json.dumps({
+                "contract_version": "smsi-archive-progress/v1",
+                "archive_date": "2026-08-07",
+                "status": "running",
+                "stage": "remote_upload",
+            }).encode()
+        raise AssertionError("运行中的归档不应读取 manifest")
+
+
+def test_running_remote_archive_never_reads_manifest(tmp_path) -> None:
+    config, profile = make_config(tmp_path, tmp_path / "source")
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    result = manager.inspect_day(profile, RunningSource(), "2026-08-07", download=True)
+    assert result is None
+    assert database.day("collector-a", "2026-08-07")["status"] == "remote_running"
+
+
+class ChangedAfterDownloadSource:
+    name = "test"
+
+    def __init__(self, fixture) -> None:
+        self.fixture = fixture
+
+    def read_small(self, relative_key: str, maximum_bytes: int):
+        if relative_key.endswith("_smsi-archive-progress.json"):
+            return json.dumps({
+                "contract_version": "smsi-archive-progress/v1",
+                "archive_date": self.fixture["archive_date"],
+                "status": "verified",
+                "stage": "verified",
+            }).encode()
+        if relative_key.endswith("manifest.json"):
+            changed = dict(self.fixture["manifest"])
+            changed["generated_at"] = "changed-during-download"
+            return json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
+        return None
+
+    def download(self, relative_key: str, destination: Path, cancel=None) -> int:
+        shutil.copyfile(self.fixture["object_path"], destination)
+        return destination.stat().st_size
+
+
+def test_manifest_change_during_download_is_not_published(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    snapshot = parse_manifest(fixture["manifest_raw"], fixture["archive_date"])
+
+    with pytest.raises(RuntimeError, match="下载期间远端 manifest 已变化"):
+        manager.download_day(profile, ChangedAfterDownloadSource(fixture), snapshot)
+
+    assert not manager.final_root(profile, fixture["archive_date"]).exists()
+    assert manager.staging_root(profile, fixture["archive_date"]).exists()
+
+
+def test_failed_local_recheck_is_recorded_and_recovered_without_erasing_evidence(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    final = manager.final_root(profile, fixture["archive_date"])
+    local_object = final / "business" / "table=price_data" / "day" / "part-00000.parquet"
+    local_object.write_bytes(b"corrupted")
+
+    with pytest.raises(RuntimeError):
+        manager.verify_existing(profile.profile_id, fixture["archive_date"])
+
+    assert (final / ".smsi-verification-failed.json").is_file()
+    assert database.day(profile.profile_id, fixture["archive_date"])["status"] == "error"
+
+    result = manager.scan_profile(profile, download=True)
+    assert result["failed"] == 0
+    assert database.day(profile.profile_id, fixture["archive_date"])["status"] == "verified"
+    quarantined = list(manager.quarantine_root(profile).glob("date=2026-08-07.*.unverified"))
+    assert len(quarantined) == 1
+    assert (quarantined[0] / ".smsi-verification-failed.json").is_file()

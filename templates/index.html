@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SMSI 归档备份</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark small">S</span><span>SMSI</span><strong>归档备份</strong></div>
+    <nav class="tabs" aria-label="主导航">
+      <button class="tab active" data-page="overview">总览</button>
+      <button class="tab" data-page="settings">设置</button>
+    </nav>
+    <div class="top-actions">
+      <span id="connection-state" class="status-dot neutral">连接中</span>
+      <button id="logout" class="button quiet">退出</button>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <section id="overview-page" class="page active">
+      <div class="page-heading">
+        <div><p class="eyebrow">BACKUP CONTROL</p><h1>归档状态</h1></div>
+        <div class="heading-actions">
+          <button id="scan-only" class="button secondary">检查网盘</button>
+          <button id="scan-download" class="button primary">立即同步</button>
+          <button id="cancel-task" class="button danger hidden">取消任务</button>
+        </div>
+      </div>
+
+      <section class="metric-grid">
+        <article class="metric"><span>运行状态</span><strong id="metric-runtime">--</strong><small id="metric-runtime-detail">--</small></article>
+        <article class="metric"><span>已验证日期</span><strong id="metric-verified">--</strong><small id="metric-latest">--</small></article>
+        <article class="metric"><span>待处理</span><strong id="metric-pending">--</strong><small id="metric-errors">--</small></article>
+        <article class="metric"><span>本地磁盘</span><strong id="metric-disk">--</strong><small id="metric-disk-detail">--</small></article>
+      </section>
+
+      <section class="content-band">
+        <div class="section-heading"><div><h2>采集服务器</h2><p>各归档来源的本地副本状态</p></div><span id="profile-count" class="count-badge">0</span></div>
+        <div id="profile-list" class="profile-list empty-state">尚未添加采集服务器</div>
+      </section>
+
+      <section class="content-grid">
+        <div class="content-band">
+          <div class="section-heading"><div><h2>归档日期</h2><p id="day-summary">最近记录</p></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>日期</th><th>采集服务器</th><th>状态</th><th>对象</th><th>数据量</th><th>更新时间</th><th></th></tr></thead>
+              <tbody id="days-body"><tr><td colspan="7" class="empty-cell">暂无记录</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="content-band event-band">
+          <div class="section-heading"><div><h2>运行记录</h2><p>最近 100 条</p></div></div>
+          <div id="event-list" class="event-list"><p class="empty-cell">暂无记录</p></div>
+        </div>
+      </section>
+    </section>
+
+    <section id="settings-page" class="page">
+      <div class="page-heading"><div><p class="eyebrow">CONFIGURATION</p><h1>客户端设置</h1></div><button id="save-settings" class="button primary">保存设置</button></div>
+      <form id="settings-form">
+        <section class="content-band settings-section">
+          <div class="section-heading"><div><h2>运行策略</h2><p>下载目录与任务资源限制</p></div></div>
+          <div class="form-grid">
+            <label class="span-2">本地归档目录<input name="local_root" required></label>
+            <label>检查间隔（分钟）<input name="poll_minutes" type="number" min="1" max="1440" required></label>
+            <label>扫描历史（天）<input name="history_days" type="number" min="1" max="3660" required></label>
+            <label>下载并发<input name="download_workers" type="number" min="1" max="8" required></label>
+            <label>带宽限制<input name="bandwidth_limit" placeholder="20M"></label>
+            <label>磁盘保留（GiB）<input name="minimum_free_gib" type="number" min="1" step="1" required></label>
+            <label>rclone 路径<input name="rclone_binary" required></label>
+            <label class="switch-row span-2"><input name="auto_download" type="checkbox"><span class="switch"></span><span>自动检查并下载</span></label>
+          </div>
+        </section>
+
+        <section class="content-band settings-section">
+          <div class="section-heading"><div><h2>采集服务器配置</h2><p>Google Drive 或已验证目录来源</p></div><button id="add-profile" type="button" class="button secondary">添加</button></div>
+          <div id="profile-editor" class="profile-editor"></div>
+        </section>
+      </form>
+
+      <section class="content-grid settings-bottom">
+        <form id="password-form" class="content-band settings-section">
+          <div class="section-heading"><div><h2>登录安全</h2><p>更改 Web 控制面密码</p></div></div>
+          <div class="form-grid one-column">
+            <label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label>
+            <label>新密码<input name="new_password" type="password" minlength="12" autocomplete="new-password" required></label>
+            <button class="button secondary" type="submit">更新密码</button>
+          </div>
+        </form>
+        <section class="content-band settings-section">
+          <div class="section-heading"><div><h2>Web 服务</h2><p>监听变更在重启后生效</p></div></div>
+          <div class="form-grid one-column" id="web-settings">
+            <label>监听地址<input name="web_host" form="settings-form" required></label>
+            <label>监听端口<input name="web_port" form="settings-form" type="number" min="1" max="65535" required></label>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

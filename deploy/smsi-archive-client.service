@@ -1,0 +1,24 @@
+[Unit]
+Description=SMSI Archive Backup Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smsi-archive
+Group=smsi-archive
+WorkingDirectory=@@INSTALL_DIR@@
+EnvironmentFile=/etc/smsi-archive-client.env
+ExecStart=@@INSTALL_DIR@@/.venv/bin/python @@INSTALL_DIR@@/app.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@@STATE_DIR@@ @@ARCHIVE_DIR@@
+
+[Install]
+WantedBy=multi-user.target
