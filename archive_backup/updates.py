@@ -98,7 +98,7 @@ class UpdateManager:
         return {
             "current_revision": self.current_revision(),
             "latest": latest,
-            "staged_revision": remote if staged.is_dir() else "",
+            "staged_revision": remote if staged.is_dir() and self.current_revision() != remote else "",
             "update_available": self.current_revision() != remote,
             "helper_available": Path(self.helper_socket).exists(),
         }
@@ -114,7 +114,7 @@ class UpdateManager:
             except (OSError, ValueError):
                 latest = {}
         remote = str(latest.get("revision") or "")
-        staged = remote if remote and (self.update_root / remote).is_dir() else ""
+        staged = remote if remote and (self.update_root / remote).is_dir() and current != remote else ""
         return {
             "current_revision": current,
             "latest": latest,
