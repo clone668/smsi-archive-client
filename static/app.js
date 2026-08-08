@@ -161,7 +161,7 @@
     const staged = String(updates.staged_revision || "").slice(0, 12);
     if (staged) {
       const busy = !!state.runtime?.running;
-      status.textContent = busy ? `已下载 ${staged}，归档任务完成后可重启 · 当前 ${current}` : `已下载 ${staged}，可安装并重启 · 当前 ${current}`;
+      status.textContent = busy ? `已更新 ${staged}，归档任务完成后可重启 · 当前 ${current}` : `已更新 ${staged}，可重启客户端 · 当前 ${current}`;
       status.className = "update-status ready";
       download.classList.add("hidden");
       restart.classList.remove("hidden");
@@ -208,13 +208,13 @@
       const result = await api("/api/update/download", { method: "POST", body: JSON.stringify({ revision }) });
       state.updates = result.updates;
       renderUpdates();
-      toast("更新包已下载，归档任务空闲后可安装并重启");
+      toast("更新已准备，归档任务空闲后可重启客户端");
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   }
 
   async function restartUpdate() {
-    if (!window.confirm("仅在归档任务空闲时安装更新并重启客户端，继续吗？")) return;
+    if (!window.confirm("仅在归档任务空闲时切换更新并重启客户端，继续吗？")) return;
     const button = $("#restart-update");
     button.disabled = true;
     try {
