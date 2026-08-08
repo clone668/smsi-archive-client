@@ -712,11 +712,29 @@ class ArchiveManager:
                 source, profile, archive_date
             )
             entries: dict[str, dict[str, Any]] = {}
+            browse_index: list[dict[str, Any]] = []
             if snapshot is not None:
                 prefix = f"date={archive_date}/"
                 for item in snapshot.objects:
                     key = str(item["relative_key"])
                     relative = key.removeprefix(prefix)
+                    local_path = local_object_path(final, key, archive_date)
+                    staged_path = local_object_path(stage, key, archive_date)
+                    expected_size = int(item["size_bytes"])
+                    if local_path.is_file():
+                        local_state = "present" if local_path.stat().st_size == expected_size else "mismatch"
+                    elif staged_path.is_file():
+                        local_state = "staged" if staged_path.stat().st_size == expected_size else "mismatch"
+                    elif staged_path.with_name(staged_path.name + ".downloading").is_file():
+                        local_state = "downloading"
+                    else:
+                        local_state = "missing"
+                    browse_index.append({
+                        "type": "file", "path": relative, "name": PurePosixPath(relative).name,
+                        "size_bytes": expected_size, "row_count": int(item.get("row_count") or 0),
+                        "kind": str(item.get("kind") or ""), "table_name": str(item.get("table_name") or ""),
+                        "sha256": str(item.get("sha256") or ""), "local_state": local_state,
+                    })
                     if directory:
                         if not relative.startswith(directory + "/"):
                             continue
@@ -734,27 +752,6 @@ class ArchiveManager:
                         )
                         entry["entry_count"] += 1
                         continue
-                    local_path = local_object_path(final, key, archive_date)
-                    staged_path = local_object_path(stage, key, archive_date)
-                    expected_size = int(item["size_bytes"])
-                    if local_path.is_file():
-                        local_state = (
-                            "present"
-                            if local_path.stat().st_size == expected_size
-                            else "mismatch"
-                        )
-                    elif staged_path.is_file():
-                        local_state = (
-                            "staged"
-                            if staged_path.stat().st_size == expected_size
-                            else "mismatch"
-                        )
-                    elif staged_path.with_name(
-                        staged_path.name + ".downloading"
-                    ).is_file():
-                        local_state = "downloading"
-                    else:
-                        local_state = "missing"
                     entries[child_path] = {
                         "type": "file", "path": child_path, "name": first,
                         "size_bytes": expected_size,
@@ -784,6 +781,7 @@ class ArchiveManager:
                 "total_object_count": snapshot.object_count if snapshot else 0,
                 "total_bytes": sum(int(item["size_bytes"]) for item in snapshot.objects) if snapshot else 0,
                 "total_row_count": snapshot.row_count if snapshot else 0,
+                "browse_index": browse_index,
                 "entries": ordered,
                 "files": files,
             }

@@ -4,7 +4,7 @@
     csrf: "", config: null, runtime: null, updates: null, days: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
-      remote: { request: 0, path: "" },
+      remote: { request: 0, path: "", index: null, meta: null },
       local: { request: 0, path: "" },
     },
   };
@@ -325,6 +325,10 @@
     if (!profileId) return clearFileBrowser(scope, "请先在设置中添加采集服务器");
     const request = ++state.fileBrowsers[scope].request;
     state.fileBrowsers[scope].path = "";
+    if (scope === "remote") {
+      state.fileBrowsers.remote.index = null;
+      state.fileBrowsers.remote.meta = null;
+    }
     clearFileBrowser(scope, scope === "remote" ? "正在读取网盘日期..." : "正在读取本地日期...");
     try {
       const query = new URLSearchParams({ profile_id: profileId, scope });
@@ -350,6 +354,16 @@
     if (!profileId || !archiveDate) return;
     const path = requestedPath === null ? state.fileBrowsers[scope].path : requestedPath;
     state.fileBrowsers[scope].path = path || "";
+    if (
+      scope === "remote"
+      && requestedPath !== null
+      && state.fileBrowsers.remote.index
+      && state.fileBrowsers.remote.meta?.profile_id === profileId
+      && state.fileBrowsers.remote.meta?.archive_date === archiveDate
+    ) {
+      renderRemoteIndex(path || "");
+      return;
+    }
     const request = ++state.fileBrowsers[scope].request;
     const columns = scope === "remote" ? 6 : 5;
     const body = $(`#${scope}-files-body`);
@@ -360,12 +374,60 @@
       if (path) query.set("path", path);
       const payload = await api(`/api/files/list?${query}`);
       if (request !== state.fileBrowsers[scope].request) return;
+      if (scope === "remote" && payload.result.browse_index) {
+        state.fileBrowsers.remote.index = payload.result.browse_index;
+        state.fileBrowsers.remote.meta = {
+          profile_id: profileId,
+          archive_date: archiveDate,
+          state: payload.result.state,
+          detail: payload.result.detail,
+        };
+      }
       renderFileList(scope, payload.result);
     } catch (error) {
       if (request !== state.fileBrowsers[scope].request) return;
       body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
       $(`#${scope}-summary`).textContent = error.message;
     }
+  }
+
+  function renderRemoteIndex(path) {
+    const browserState = state.fileBrowsers.remote;
+    const entries = {};
+    for (const item of browserState.index || []) {
+      const relative = String(item.path || "");
+      if (path && !relative.startsWith(`${path}/`)) continue;
+      const remainder = path ? relative.slice(path.length + 1) : relative;
+      if (!remainder) continue;
+      const [first, ...rest] = remainder.split("/");
+      const childPath = path ? `${path}/${first}` : first;
+      if (rest.length) {
+        const entry = entries[childPath] || { type: "directory", path: childPath, name: first, entry_count: 0 };
+        entry.entry_count += 1;
+        entries[childPath] = entry;
+      } else {
+        entries[childPath] = { ...item, path: childPath, name: first };
+      }
+    }
+    const ordered = Object.values(entries).sort((left, right) => {
+      const directoryOrder = Number(left.type !== "directory") - Number(right.type !== "directory");
+      return directoryOrder || String(left.name).localeCompare(String(right.name));
+    });
+    const files = ordered.filter(item => item.type === "file");
+    renderFileList("remote", {
+      scope: "remote",
+      profile_id: browserState.meta.profile_id,
+      archive_date: browserState.meta.archive_date,
+      path,
+      parent_path: path.split("/").slice(0, -1).join("/"),
+      state: browserState.meta.state,
+      detail: browserState.meta.detail,
+      entry_count: ordered.length,
+      object_count: files.length,
+      bytes_total: files.reduce((total, item) => total + Number(item.size_bytes || 0), 0),
+      row_count: files.reduce((total, item) => total + Number(item.row_count || 0), 0),
+      entries: ordered,
+    });
   }
 
   function renderFileList(scope, result) {

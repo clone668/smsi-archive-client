@@ -262,6 +262,8 @@ def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -
     assert result["state"] == "ready"
     assert result["entry_count"] == 1
     assert result["entries"][0]["type"] == "directory"
+    assert len(result["browse_index"]) == 1
+    assert result["browse_index"][0]["path"] == "business/table=price_data/day/part-00000.parquet"
     nested = manager.browse_files(
         profile.profile_id,
         fixture["archive_date"],
