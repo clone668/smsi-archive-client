@@ -14,6 +14,7 @@ from werkzeug.security import check_password_hash
 
 from .config import CONFIG_VERSION, ClientConfig, ConfigStore
 from .database import StateDatabase
+from .manager import ArchiveManager
 from .service import ArchiveService
 
 
@@ -144,6 +145,19 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "runtime": service.status(),
             "days": database.days(1000),
             "events": database.events(100),
+        })
+
+    @app.get("/api/day-detail")
+    def api_day_detail():
+        profile_id = str(request.args.get("profile_id") or "").strip()
+        archive_date = str(request.args.get("archive_date") or "").strip()
+        if not profile_id or not archive_date:
+            raise ValueError("缺少配置或归档日期")
+        current = config_store.load()
+        database_manager = ArchiveManager(current, database)
+        return jsonify({
+            "ok": True,
+            "detail": database_manager.day_detail(profile_id, archive_date),
         })
 
     @app.put("/api/config")

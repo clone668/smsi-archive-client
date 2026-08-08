@@ -29,6 +29,7 @@ class ArchiveService:
             "last_finished_at": "",
             "last_error": "",
             "next_scan_at": "",
+            "progress": {},
         }
 
     def start(self) -> None:
@@ -92,7 +93,12 @@ class ArchiveService:
 
     def _execute(self, action: str, arguments: dict[str, str]) -> None:
         config = self.store.load()
-        manager = ArchiveManager(config, self.database, cancel=self._cancel)
+        manager = ArchiveManager(
+            config,
+            self.database,
+            cancel=self._cancel,
+            progress=self._update_progress,
+        )
         if action in {"scan", "scan_download"}:
             results = manager.scan_all(download=action == "scan_download")
             detail = f"已检查 {sum(item['dates'] for item in results)} 个日期"
@@ -102,6 +108,9 @@ class ArchiveService:
         else:
             raise RuntimeError("未知后台任务")
         self._set_state(detail=detail)
+
+    def _update_progress(self, progress: dict[str, Any]) -> None:
+        self._set_state(progress=dict(progress))
 
     def _loop(self) -> None:
         first_run = True

@@ -18,6 +18,40 @@ from .verifier import OperationCancelled
 
 DATE_DIR_RE = re.compile(r"^date=(20\d{2}-\d{2}-\d{2})/?$")
 ProgressCallback = Callable[[int], None]
+BandwidthLimit = str | None
+_BANDWIDTH_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?)(?P<unit>[kmgt](?:i?b)?|b)?$", re.IGNORECASE)
+_BANDWIDTH_UNITS = {
+    "b": 1,
+    "k": 1000,
+    "kb": 1000,
+    "ki": 1024,
+    "kib": 1024,
+    "m": 1000**2,
+    "mb": 1000**2,
+    "mi": 1024**2,
+    "mib": 1024**2,
+    "g": 1000**3,
+    "gb": 1000**3,
+    "gi": 1024**3,
+    "gib": 1024**3,
+    "t": 1000**4,
+    "tb": 1000**4,
+    "ti": 1024**4,
+    "tib": 1024**4,
+}
+
+
+def split_bandwidth_limit(value: str, workers: int) -> str:
+    """Convert the configured global cap into a per-rclone-worker cap."""
+    text = str(value or "").strip()
+    if not text or text.casefold() in {"off", "unlimited", "0"}:
+        return text
+    match = _BANDWIDTH_RE.fullmatch(text)
+    if not match:
+        return text
+    unit = (match.group("unit") or "b").casefold()
+    total = float(match.group("number")) * _BANDWIDTH_UNITS[unit]
+    return f"{max(1, int(total / max(1, int(workers))))}B"
 
 
 def safe_relative_key(value: str) -> str:
@@ -60,7 +94,14 @@ class ArchiveSource(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def download(self, relative_key: str, destination: Path, cancel: Event | None = None) -> int:
+    def download(
+        self,
+        relative_key: str,
+        destination: Path,
+        cancel: Event | None = None,
+        progress: ProgressCallback | None = None,
+        bandwidth_limit: BandwidthLimit = None,
+    ) -> int:
         raise NotImplementedError
 
 
@@ -144,7 +185,14 @@ class RcloneSource(ArchiveSource):
             raise RuntimeError(f"远端文件超过安全大小: {relative_key}")
         return payload
 
-    def download(self, relative_key: str, destination: Path, cancel: Event | None = None) -> int:
+    def download(
+        self,
+        relative_key: str,
+        destination: Path,
+        cancel: Event | None = None,
+        progress: ProgressCallback | None = None,
+        bandwidth_limit: BandwidthLimit = None,
+    ) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         arguments = [
             "copyto",
@@ -164,7 +212,7 @@ class RcloneSource(ArchiveSource):
             "--timeout",
             "2m",
         ]
-        limit = self.config.bandwidth_limit.strip()
+        limit = (self.config.bandwidth_limit if bandwidth_limit is None else bandwidth_limit).strip()
         if limit:
             arguments.extend(["--bwlimit", limit])
         process = subprocess.Popen(
@@ -177,6 +225,7 @@ class RcloneSource(ArchiveSource):
             creationflags=self._creation_flags(),
         )
         deadline = time.monotonic() + 24 * 60 * 60
+        last_size = -1
         while True:
             if cancel is not None and cancel.is_set():
                 process.terminate()
@@ -194,6 +243,11 @@ class RcloneSource(ArchiveSource):
                     process.kill()
                     process.wait(timeout=10)
                 raise RuntimeError("rclone 下载超时")
+            if progress is not None and destination.is_file():
+                current_size = destination.stat().st_size
+                if current_size != last_size:
+                    last_size = current_size
+                    progress(current_size)
             try:
                 _stdout, stderr = process.communicate(timeout=1)
                 break
@@ -203,7 +257,10 @@ class RcloneSource(ArchiveSource):
             raise RuntimeError(f"rclone 下载失败: {(stderr or 'unknown error').strip()[:2000]}")
         if not destination.is_file():
             raise RuntimeError(f"rclone 未生成目标文件: {relative_key}")
-        return destination.stat().st_size
+        observed_size = destination.stat().st_size
+        if progress is not None:
+            progress(observed_size)
+        return observed_size
 
 
 class RcloneDriveSource(RcloneSource):
@@ -288,7 +345,14 @@ class VerifiedDirectorySource(ArchiveSource):
             raise RuntimeError(f"来源文件超过安全大小: {relative_key}")
         return path.read_bytes()
 
-    def download(self, relative_key: str, destination: Path, cancel: Event | None = None) -> int:
+    def download(
+        self,
+        relative_key: str,
+        destination: Path,
+        cancel: Event | None = None,
+        progress: ProgressCallback | None = None,
+        bandwidth_limit: BandwidthLimit = None,
+    ) -> int:
         key = safe_relative_key(relative_key)
         date_match = DATE_DIR_RE.fullmatch(PurePosixPath(key).parts[0])
         if not date_match or not self._day_is_verified(date_match.group(1)):
@@ -302,6 +366,8 @@ class VerifiedDirectorySource(ArchiveSource):
                 if cancel is not None and cancel.is_set():
                     raise OperationCancelled("复制已取消，未完成结果不会发布")
                 output_handle.write(chunk)
+                if progress is not None:
+                    progress(output_handle.tell())
         return destination.stat().st_size
 
 

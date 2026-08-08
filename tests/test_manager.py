@@ -12,6 +12,7 @@ from archive_backup.database import StateDatabase
 from archive_backup.manager import ArchiveManager
 from archive_backup.protocol import parse_manifest
 from archive_backup.sources import VerifiedDirectorySource
+from archive_backup.verifier import OperationCancelled
 
 
 def make_config(tmp_path: Path, source_root: Path) -> tuple[ClientConfig, ProfileConfig]:
@@ -46,6 +47,20 @@ def test_verified_directory_downloads_and_publishes_atomically(tmp_path, archive
     target = final / "business" / "table=price_data" / "day" / "part-00000.parquet"
     assert hashlib.sha256(target.read_bytes()).hexdigest() == fixture["manifest"]["objects"][0]["sha256"]
     assert database.day("collector-a", "2026-08-07")["status"] == "verified"
+
+
+def test_download_reports_byte_progress_without_changing_verification_gate(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    updates: list[dict] = []
+    manager = ArchiveManager(config, database, progress=updates.append)
+
+    manager.scan_profile(profile, download=True)
+
+    assert any(item["phase"] == "downloading" and item["bytes_transferred"] > 0 for item in updates)
+    assert updates[-1]["phase"] == "verified"
+    assert updates[-1]["bytes_done"] == updates[-1]["bytes_total"]
 
 
 def test_verified_directory_ignores_unverified_source_day(tmp_path, archive_fixture) -> None:
@@ -138,8 +153,10 @@ class ChangedAfterDownloadSource:
             return json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
         return None
 
-    def download(self, relative_key: str, destination: Path, cancel=None) -> int:
+    def download(self, relative_key: str, destination: Path, cancel=None, progress=None, bandwidth_limit=None) -> int:
         shutil.copyfile(self.fixture["object_path"], destination)
+        if progress:
+            progress(destination.stat().st_size)
         return destination.stat().st_size
 
 
@@ -181,3 +198,51 @@ def test_failed_local_recheck_is_recorded_and_recovered_without_erasing_evidence
     quarantined = list(manager.quarantine_root(profile).glob("date=2026-08-07.*.unverified"))
     assert len(quarantined) == 1
     assert (quarantined[0] / ".smsi-verification-failed.json").is_file()
+
+
+class CancelDuringDownloadSource:
+    name = "test"
+
+    def __init__(self, fixture, cancel) -> None:
+        self.fixture = fixture
+        self.cancel = cancel
+
+    def list_dates(self):
+        return {self.fixture["archive_date"]}
+
+    def read_small(self, relative_key: str, maximum_bytes: int):
+        if relative_key.endswith("manifest.json"):
+            return self.fixture["manifest_raw"]
+        if relative_key.endswith("_smsi-archive-progress.json"):
+            return json.dumps({
+                "contract_version": "smsi-archive-progress/v1",
+                "archive_date": self.fixture["archive_date"],
+                "status": "verified",
+                "stage": "verified",
+            }).encode()
+        return None
+
+    def download(self, relative_key, destination, cancel=None, progress=None, bandwidth_limit=None):
+        shutil.copyfile(self.fixture["object_path"], destination)
+        if progress:
+            progress(destination.stat().st_size)
+        self.cancel.set()
+        raise OperationCancelled("下载已取消，未完成结果不会发布")
+
+
+def test_cancel_marks_day_cancelled_and_keeps_staging(tmp_path, archive_fixture, monkeypatch) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    source = CancelDuringDownloadSource(fixture, manager.cancel)
+    monkeypatch.setattr("archive_backup.manager.build_source", lambda _config, _profile: source)
+
+    with pytest.raises(OperationCancelled):
+        manager.scan_profile(profile, download=True)
+
+    row = database.day(profile.profile_id, fixture["archive_date"])
+    assert row["status"] == "cancelled"
+    assert "下次可继续" in row["detail"]
+    assert manager.staging_root(profile, fixture["archive_date"]).exists()
+    assert not manager.final_root(profile, fixture["archive_date"]).exists()

@@ -4,15 +4,16 @@ import json
 import os
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable
 
 from .config import ClientConfig, ProfileConfig
 from .database import StateDatabase
 from .protocol import DATE_RE, ManifestSnapshot, parse_manifest, parse_progress
-from .sources import ArchiveSource, build_source
+from .sources import ArchiveSource, build_source, split_bandwidth_limit
 from .verifier import (
     OperationCancelled,
     local_object_path,
@@ -49,11 +50,22 @@ class ArchiveManager:
         database: StateDatabase,
         *,
         cancel: threading.Event | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config = config
         self.database = database
         self.cancel = cancel or threading.Event()
         self._progress_lock = threading.Lock()
+        self._progress_callback = progress
+
+    def _emit_progress(self, payload: dict[str, Any]) -> None:
+        if self._progress_callback is None:
+            return
+        try:
+            self._progress_callback(payload)
+        except Exception:
+            # Progress reporting must never interrupt archive verification.
+            return
 
     def profile_root(self, profile: ProfileConfig) -> Path:
         return self.config.archive_root / f"collector={profile.collector_id}"
@@ -175,6 +187,8 @@ class ArchiveManager:
         stage: Path,
         snapshot: ManifestSnapshot,
         item: dict[str, Any],
+        bandwidth_limit: str,
+        progress: Callable[[str, int, bool], None] | None = None,
     ) -> tuple[str, int, int]:
         raise_if_cancelled(self.cancel)
         key = str(item["relative_key"])
@@ -183,19 +197,33 @@ class ArchiveManager:
         destination = local_object_path(stage, key, snapshot.archive_date)
         if destination.is_file() and destination.stat().st_size == expected_size:
             if sha256_file(destination, self.cancel) == expected_sha:
+                if progress is not None:
+                    progress(key, expected_size, True)
                 return key, expected_size, 0
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".downloading")
         if temporary.exists():
             temporary.unlink()
         try:
-            observed_size = source.download(key, temporary, self.cancel)
+            def source_progress(current: int) -> None:
+                if progress is not None:
+                    progress(key, min(max(int(current), 0), expected_size), False)
+
+            observed_size = source.download(
+                key,
+                temporary,
+                self.cancel,
+                progress=source_progress,
+                bandwidth_limit=bandwidth_limit,
+            )
             raise_if_cancelled(self.cancel)
             if observed_size != expected_size or temporary.stat().st_size != expected_size:
                 raise RuntimeError(f"下载对象大小不一致: {key}")
             if sha256_file(temporary, self.cancel) != expected_sha:
                 raise RuntimeError(f"下载对象 SHA-256 不一致: {key}")
             os.replace(temporary, destination)
+            if progress is not None:
+                progress(key, expected_size, True)
         finally:
             if temporary.exists():
                 temporary.unlink()
@@ -251,9 +279,82 @@ class ArchiveManager:
         objects_done = 0
         bytes_done = 0
         network_bytes = 0
-        with ThreadPoolExecutor(max_workers=self.config.download_workers) as executor:
+        download_workers = max(1, min(self.config.download_workers, max(snapshot.object_count, 1)))
+        per_worker_bandwidth = split_bandwidth_limit(
+            self.config.bandwidth_limit, download_workers
+        )
+        object_bytes: dict[str, int] = {}
+        completed_keys: set[str] = set()
+        active_keys: set[str] = set()
+        object_sizes = {
+            str(value["relative_key"]): int(value["size_bytes"])
+            for value in snapshot.objects
+        }
+        started_monotonic = time.monotonic()
+
+        def publish_progress(key: str, current: int, completed: bool) -> None:
+            with self._progress_lock:
+                item_size = object_sizes[key]
+                object_bytes[key] = min(max(int(current), 0), item_size)
+                if completed:
+                    completed_keys.add(key)
+                    active_keys.discard(key)
+                else:
+                    active_keys.add(key)
+                bytes_transferred = sum(object_bytes.values())
+                completed_bytes = sum(object_sizes[key] for key in completed_keys)
+                elapsed = max(time.monotonic() - started_monotonic, 0.001)
+                speed = bytes_transferred / elapsed
+                remaining = max(bytes_total - bytes_transferred, 0)
+                self._emit_progress({
+                    "phase": "downloading",
+                    "profile_id": profile.profile_id,
+                    "archive_date": archive_date,
+                    "object_count": snapshot.object_count,
+                    "objects_done": len(completed_keys),
+                    "bytes_total": bytes_total,
+                    "bytes_done": completed_bytes,
+                    "bytes_transferred": bytes_transferred,
+                    "current_object": key,
+                    "current_object_bytes": object_bytes[key],
+                    "current_object_total": item_size,
+                    "active_transfers": len(active_keys),
+                    "download_workers": download_workers,
+                    "bandwidth_limit": self.config.bandwidth_limit.strip(),
+                    "speed_bytes_per_second": int(speed),
+                    "eta_seconds": int(remaining / speed) if speed > 0 else None,
+                })
+
+        self._emit_progress({
+            "phase": "downloading",
+            "profile_id": profile.profile_id,
+            "archive_date": archive_date,
+            "object_count": snapshot.object_count,
+            "objects_done": 0,
+            "bytes_total": bytes_total,
+            "bytes_done": 0,
+            "bytes_transferred": 0,
+            "current_object": "",
+            "current_object_bytes": 0,
+            "current_object_total": 0,
+            "active_transfers": 0,
+            "download_workers": download_workers,
+            "bandwidth_limit": self.config.bandwidth_limit.strip(),
+            "speed_bytes_per_second": 0,
+            "eta_seconds": None,
+        })
+
+        with ThreadPoolExecutor(max_workers=download_workers) as executor:
             futures = [
-                executor.submit(self._download_one, source, stage, snapshot, item)
+                executor.submit(
+                    self._download_one,
+                    source,
+                    stage,
+                    snapshot,
+                    item,
+                    per_worker_bandwidth,
+                    publish_progress,
+                )
                 for item in snapshot.objects
             ]
             for future in as_completed(futures):
@@ -272,6 +373,25 @@ class ArchiveManager:
                         detail=f"已完成 {objects_done}/{snapshot.object_count} 个对象",
                     )
 
+        self._emit_progress({
+            "phase": "verifying",
+            "profile_id": profile.profile_id,
+            "archive_date": archive_date,
+            "object_count": snapshot.object_count,
+            "objects_done": snapshot.object_count,
+            "bytes_total": bytes_total,
+            "bytes_done": bytes_total,
+            "bytes_transferred": bytes_total,
+            "current_object": "",
+            "current_object_bytes": 0,
+            "current_object_total": 0,
+            "active_transfers": 0,
+            "download_workers": download_workers,
+            "bandwidth_limit": self.config.bandwidth_limit.strip(),
+            "speed_bytes_per_second": 0,
+            "eta_seconds": None,
+        })
+
         self.database.upsert_day(
             profile.profile_id,
             archive_date,
@@ -288,6 +408,24 @@ class ArchiveManager:
                 status="verifying",
                 detail=f"完整校验 {current}/{total}",
             )
+            self._emit_progress({
+                "phase": "verifying",
+                "profile_id": profile.profile_id,
+                "archive_date": archive_date,
+                "object_count": snapshot.object_count,
+                "objects_done": current,
+                "bytes_total": bytes_total,
+                "bytes_done": bytes_total,
+                "bytes_transferred": bytes_total,
+                "current_object": _key,
+                "current_object_bytes": 0,
+                "current_object_total": 0,
+                "active_transfers": 0,
+                "download_workers": download_workers,
+                "bandwidth_limit": self.config.bandwidth_limit.strip(),
+                "speed_bytes_per_second": 0,
+                "eta_seconds": None,
+            })
 
         report = verify_local_day(stage, snapshot, verification_progress, self.cancel)
         latest_snapshot, latest_state, latest_detail = self._remote_snapshot(
@@ -327,6 +465,24 @@ class ArchiveManager:
             archive_date=archive_date,
             detail=f"{snapshot.object_count} 个对象，{snapshot.row_count} 行",
         )
+        self._emit_progress({
+            "phase": "verified",
+            "profile_id": profile.profile_id,
+            "archive_date": archive_date,
+            "object_count": snapshot.object_count,
+            "objects_done": snapshot.object_count,
+            "bytes_total": bytes_total,
+            "bytes_done": bytes_total,
+            "bytes_transferred": bytes_total,
+            "current_object": "",
+            "current_object_bytes": 0,
+            "current_object_total": 0,
+            "active_transfers": 0,
+            "download_workers": download_workers,
+            "bandwidth_limit": self.config.bandwidth_limit.strip(),
+            "speed_bytes_per_second": 0,
+            "eta_seconds": 0,
+        })
         return report
 
     def inspect_day(
@@ -375,6 +531,91 @@ class ArchiveManager:
         )
         return self.download_day(profile, source, snapshot) if download else None
 
+    def day_detail(self, profile_id: str, archive_date: str) -> dict[str, Any]:
+        """Return a click-triggered remote manifest/local inventory snapshot."""
+        profile = next(
+            (item for item in self.config.profiles if item.profile_id == profile_id),
+            None,
+        )
+        if profile is None:
+            raise RuntimeError("配置不存在")
+        try:
+            date.fromisoformat(archive_date)
+        except ValueError as exc:
+            raise RuntimeError("归档日期无效") from exc
+        source = build_source(self.config, profile)
+        snapshot, remote_state, remote_detail = self._remote_snapshot(
+            source, profile, archive_date
+        )
+        final = self.final_root(profile, archive_date)
+        stage = self.staging_root(profile, archive_date)
+        row = self.database.day(profile_id, archive_date) or {}
+        objects: list[dict[str, Any]] = []
+        remote_bytes = 0
+        if snapshot is not None:
+            remote_bytes = sum(int(item["size_bytes"]) for item in snapshot.objects)
+            for item in snapshot.objects:
+                key = str(item["relative_key"])
+                final_path = local_object_path(final, key, archive_date)
+                stage_path = local_object_path(stage, key, archive_date)
+                temporary_path = stage_path.with_name(stage_path.name + ".downloading")
+                expected_size = int(item["size_bytes"])
+                if final_path.is_file():
+                    local_state = (
+                        "present"
+                        if final_path.stat().st_size == expected_size
+                        else "mismatch"
+                    )
+                    local_bytes = final_path.stat().st_size
+                elif temporary_path.is_file():
+                    local_state = "downloading"
+                    local_bytes = temporary_path.stat().st_size
+                elif stage_path.is_file():
+                    local_state = "staged"
+                    local_bytes = stage_path.stat().st_size
+                else:
+                    local_state = "missing"
+                    local_bytes = 0
+                objects.append({
+                    "relative_key": key,
+                    "name": PurePosixPath(key).name,
+                    "size_bytes": expected_size,
+                    "remote_state": "available",
+                    "local_state": local_state,
+                    "local_bytes": local_bytes,
+                })
+        local_present = sum(
+            item["local_state"] in {"present", "downloading", "staged"}
+            for item in objects
+        )
+        local_bytes = sum(
+            int(item["local_bytes"])
+            for item in objects
+            if item["local_state"] in {"present", "downloading", "staged"}
+        )
+        return {
+            "profile_id": profile_id,
+            "archive_date": archive_date,
+            "source_type": profile.source_type,
+            "remote": {
+                "state": "ready" if snapshot is not None else remote_state,
+                "detail": remote_detail,
+                "object_count": snapshot.object_count if snapshot else 0,
+                "bytes_total": remote_bytes,
+                "manifest_sha256": snapshot.sha256 if snapshot else "",
+            },
+            "local": {
+                "state": str(row.get("status") or "missing"),
+                "detail": str(row.get("detail") or ""),
+                "object_count": local_present,
+                "bytes_done": local_bytes,
+                "bytes_total": remote_bytes,
+                "final_exists": final.is_dir(),
+                "staging_exists": stage.is_dir(),
+            },
+            "objects": objects,
+        }
+
     def scan_profile(self, profile: ProfileConfig, *, download: bool) -> dict[str, Any]:
         source = build_source(self.config, profile)
         dates = self._eligible_dates(source)
@@ -387,6 +628,33 @@ class ArchiveManager:
                 if report:
                     completed += 1
             except OperationCancelled:
+                row = self.database.day(profile.profile_id, archive_date) or {}
+                if row.get("status") in {"downloading", "verifying"}:
+                    self.database.upsert_day(
+                        profile.profile_id,
+                        archive_date,
+                        status="cancelled",
+                        detail="任务已取消，已完成部分保留，下次可继续",
+                        error="",
+                    )
+                    self._emit_progress({
+                        "phase": "cancelled",
+                        "profile_id": profile.profile_id,
+                        "archive_date": archive_date,
+                        "object_count": int(row.get("object_count") or 0),
+                        "objects_done": int(row.get("objects_done") or 0),
+                        "bytes_total": int(row.get("bytes_total") or 0),
+                        "bytes_done": int(row.get("bytes_done") or 0),
+                        "bytes_transferred": int(row.get("bytes_done") or 0),
+                        "current_object": "",
+                        "current_object_bytes": 0,
+                        "current_object_total": 0,
+                        "active_transfers": 0,
+                        "download_workers": self.config.download_workers,
+                        "bandwidth_limit": self.config.bandwidth_limit.strip(),
+                        "speed_bytes_per_second": 0,
+                        "eta_seconds": None,
+                    })
                 raise
             except Exception as exc:
                 failed += 1

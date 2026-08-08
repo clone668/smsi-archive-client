@@ -113,6 +113,16 @@ tbody tr:hover { background: var(--surface-2); }
 .state-pill.good { background: var(--good-soft); color: var(--good); }
 .state-pill.warn { background: var(--warn-soft); color: var(--warn); }
 .state-pill.bad { background: var(--bad-soft); color: var(--bad); }
+.row-progress-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.state-text.good { color: var(--good); }
+.state-text.warn { color: var(--warn); }
+.state-text.bad { color: var(--bad); }
+.row-actions { white-space: nowrap; }
+.day-detail-row td { padding: 0; background: var(--surface-2); }
+.day-detail-content { padding: 12px 14px; border-top: 1px solid var(--line); }
+.day-detail-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 10px; color: var(--muted); font-size: 12px; }
+.day-detail-summary span { overflow-wrap: anywhere; }
+.object-table th, .object-table td { height: 34px; padding: 5px 8px; }
 .event-list { max-height: 414px; overflow: auto; }
 .event-item { padding: 10px 13px; border-bottom: 1px solid var(--line); }
 .event-item:last-child { border-bottom: 0; }

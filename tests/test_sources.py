@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.sources import RcloneSftpSource, build_source
+from archive_backup.sources import split_bandwidth_limit
 
 
 def make_sftp_profile() -> ProfileConfig:
@@ -42,3 +43,9 @@ def test_sftp_source_uses_fixed_host_key_and_read_only_root(_resolve) -> None:
 def test_build_source_selects_sftp(_resolve) -> None:
     source = build_source(ClientConfig(), make_sftp_profile())
     assert isinstance(source, RcloneSftpSource)
+
+
+def test_global_bandwidth_limit_is_split_across_workers() -> None:
+    assert split_bandwidth_limit("20M", 2) == "10000000B"
+    assert split_bandwidth_limit("off", 4) == "off"
+    assert split_bandwidth_limit("", 4) == ""

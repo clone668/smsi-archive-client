@@ -20,6 +20,7 @@
     verified: ["已验证", "good"], downloading: ["下载中", "warn"], verifying: ["校验中", "warn"],
     ready: ["可下载", "warn"], remote_running: ["远端归档中", "warn"], waiting_manifest: ["等待发布", "warn"],
     remote_failed: ["远端失败", "bad"], error: ["处理失败", "bad"], manifest_changed: ["清单已变化", "bad"],
+    cancelled: ["已取消", "warn"],
     unknown: ["未知", ""],
   };
   let toastTimer;
@@ -87,11 +88,56 @@
     $("#day-summary").textContent = `${state.days.length} 条本地状态记录`;
     if (!state.days.length) { body.innerHTML = '<tr><td colspan="7" class="empty-cell">暂无记录</td></tr>'; return; }
     body.innerHTML = state.days.map(item => {
+      const live = state.runtime?.progress;
+      const liveMatches = live && live.profile_id === item.profile_id && live.archive_date === item.archive_date && ["downloading", "verifying"].includes(live.phase);
+      const objectsDone = liveMatches ? Number(live.objects_done || 0) : Number(item.objects_done || 0);
+      const objectCount = liveMatches ? Number(live.object_count || item.object_count || 0) : Number(item.object_count || 0);
+      const bytesDone = liveMatches ? Number(live.bytes_transferred || live.bytes_done || 0) : Number(item.bytes_done || 0);
+      const bytesTotal = liveMatches ? Number(live.bytes_total || item.bytes_total || 0) : Number(item.bytes_total || 0);
       const [label, tone] = statusMap[item.status] || [item.status, ""];
-      const action = item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">重新校验</button>` : "";
-      return `<tr title="${escapeHtml(item.error || item.detail || "")}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${Number(item.objects_done || 0)}/${Number(item.object_count || 0)}</td><td>${bytes(item.bytes_done || item.bytes_total)}</td><td>${timeText(item.updated_at)}</td><td>${action}</td></tr>`;
+      const liveDetail = liveMatches ? [
+        live.current_object ? `当前 ${live.current_object.split("/").at(-1)}` : "",
+        live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "",
+        live.eta_seconds != null ? `剩余约 ${durationText(live.eta_seconds)}` : "",
+      ].filter(Boolean).join(" · ") : "";
+      const detailText = liveDetail || item.error || item.detail || "";
+      const dataText = objectCount ? `${bytesDone ? bytes(bytesDone) : "0 B"} / ${bytes(bytesTotal)}` : bytes(bytesTotal);
+      const statusDetail = liveDetail ? `<small class="row-progress-detail">${escapeHtml(liveDetail)}</small>` : "";
+      const action = `${item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">重新校验</button>` : ""}<button class="button small quiet day-detail-toggle" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">文件详情</button>`;
+      return `<tr title="${escapeHtml(detailText)}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span>${statusDetail}</td><td>${objectsDone}/${objectCount}</td><td>${dataText}</td><td>${timeText(item.updated_at)}</td><td class="row-actions">${action}</td></tr><tr class="day-detail-row hidden"><td colspan="7"><div class="day-detail-content"></div></td></tr>`;
     }).join("");
     $$(".verify-day", body).forEach(button => button.addEventListener("click", () => verifyDay(button.dataset.profile, button.dataset.date)));
+    $$(".day-detail-toggle", body).forEach(button => button.addEventListener("click", () => toggleDayDetail(button)));
+  }
+
+  function durationText(seconds) {
+    const value = Math.max(0, Math.round(Number(seconds) || 0));
+    if (value < 60) return `${value} 秒`;
+    const minutes = Math.floor(value / 60);
+    const rest = value % 60;
+    return minutes < 60 ? `${minutes} 分 ${rest} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+  }
+
+  const localObjectStatus = {
+    present: ["本地存在", "good"], downloading: ["下载中", "warn"], staged: ["已暂存", "warn"],
+    missing: ["待下载", ""], mismatch: ["大小异常", "bad"],
+  };
+
+  async function toggleDayDetail(button) {
+    const detailRow = button.closest("tr").nextElementSibling;
+    const content = $(".day-detail-content", detailRow);
+    if (!detailRow.classList.contains("hidden")) { detailRow.classList.add("hidden"); button.textContent = "文件详情"; return; }
+    detailRow.classList.remove("hidden"); button.textContent = "收起详情";
+    if (detailRow.dataset.loaded === "true") return;
+    content.innerHTML = '<p class="empty-cell">正在读取远端 manifest 和本地文件状态...</p>';
+    try {
+      const query = `?profile_id=${encodeURIComponent(button.dataset.profile)}&archive_date=${encodeURIComponent(button.dataset.date)}`;
+      const result = await api(`/api/day-detail${query}`);
+      const detail = result.detail;
+      const remoteState = statusMap[detail.remote.state] || [detail.remote.state, ""];
+      content.innerHTML = `<div class="day-detail-summary"><span>远端：<strong class="state-text ${remoteState[1]}">${escapeHtml(remoteState[0])}</strong> · ${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.remote.bytes_total)}</span><span>本地：${Number(detail.local.object_count || 0)}/${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.local.bytes_done)} / ${bytes(detail.remote.bytes_total)}</span><span>${escapeHtml(detail.remote.detail || detail.local.detail || "")}</span></div>${detail.objects.length ? `<div class="table-wrap"><table class="object-table"><thead><tr><th>对象</th><th>远端</th><th>本地</th><th>大小</th><th>本地字节</th></tr></thead><tbody>${detail.objects.map(item => { const state = localObjectStatus[item.local_state] || [item.local_state, ""]; return `<tr><td title="${escapeHtml(item.relative_key)}">${escapeHtml(item.name)}</td><td><span class="state-pill good">已列入 manifest</span></td><td><span class="state-pill ${state[1]}">${escapeHtml(state[0])}</span></td><td>${bytes(item.size_bytes)}</td><td>${bytes(item.local_bytes)}</td></tr>`; }).join("")}</tbody></table></div>` : '<p class="empty-cell">远端尚未发布可读取的 manifest。</p>'}`;
+      detailRow.dataset.loaded = "true";
+    } catch (error) { content.innerHTML = `<p class="form-error">${escapeHtml(error.message)}</p>`; }
   }
 
   function renderEvents() {
