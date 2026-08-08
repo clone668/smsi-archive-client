@@ -4,8 +4,8 @@
     csrf: "", config: null, runtime: null, updates: null, days: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
-      remote: { request: 0, path: "", index: null, meta: null },
-      local: { request: 0, path: "" },
+      remote: { request: 0, path: "", date: "", dates: [], index: null, meta: null },
+      local: { request: 0, path: "", date: "", dates: [] },
     },
   };
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -314,11 +314,49 @@
 
   async function restartUpdate() {
     const button = $("#restart-update");
+    const targetRevision = state.updates?.staged_revision;
+    if (!targetRevision) return toast("没有已准备好的更新包", true);
     button.disabled = true;
+    $("#update-detail").textContent = "正在重启客户端，等待新版本上线...";
+    $("#update-detail").className = "update-detail";
     try {
       await api("/api/update/restart", { method: "POST", body: "{}" });
-      toast("更新已切换，客户端正在重启");
-    } catch (error) { toast(error.message, true); button.disabled = false; }
+    } catch (error) {
+      const blocked = /归档任务正在运行|更新助手未安装|更新助手拒绝|无法连接更新助手/.test(error.message);
+      if (blocked) {
+        toast(error.message, true);
+        button.disabled = false;
+        await pollUpdateStatus();
+        return;
+      }
+      // 服务重启时连接可能先断开，继续用版本标记确认是否已经切换。
+    }
+    toast("客户端正在重启，页面会自动刷新");
+    waitForClientRevision(targetRevision, 0);
+  }
+
+  function waitForClientRevision(targetRevision, attempt) {
+    setTimeout(async () => {
+      try {
+        const response = await fetch("/api/update/status", { credentials: "same-origin", cache: "no-store" });
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload.updates?.current_revision === targetRevision) {
+            window.location.reload();
+            return;
+          }
+        }
+      } catch (error) {
+        // 服务切换期间短暂断开是预期的，继续等待恢复。
+      }
+      if (attempt < 20) {
+        waitForClientRevision(targetRevision, attempt + 1);
+      } else {
+        toast("重启结果暂时无法确认，请手动刷新页面", true);
+        $("#restart-update").disabled = false;
+        await pollUpdateStatus();
+      }
+    }, 1000);
   }
 
   function renderFileProfileOptions() {
@@ -336,9 +374,8 @@
 
   function clearFileBrowser(scope, message) {
     $(`#${scope}-breadcrumbs`).innerHTML = "";
-    const dateSelect = $(`#${scope}-date`);
-    dateSelect.innerHTML = '<option value="">暂无日期</option>';
-    dateSelect.disabled = true;
+    state.fileBrowsers[scope].date = "";
+    state.fileBrowsers[scope].dates = [];
     $(`#${scope}-summary`).textContent = message;
     const columns = scope === "remote" ? 6 : 5;
     $(`#${scope}-files-body`).innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(message)}</td></tr>`;
@@ -359,13 +396,9 @@
       const payload = await api(`/api/files/dates?${query}`);
       if (request !== state.fileBrowsers[scope].request) return;
       const dates = payload.result.dates || [];
-      const select = $(`#${scope}-date`);
-      select.innerHTML = dates.length
-        ? dates.map(item => `<option value="${escapeHtml(item.archive_date)}">${escapeHtml(item.archive_date)}</option>`).join("")
-        : '<option value="">暂无日期</option>';
-      select.disabled = !dates.length;
+      state.fileBrowsers[scope].dates = dates;
       if (!dates.length) return clearFileBrowser(scope, scope === "remote" ? "网盘中没有可浏览的归档日期" : "本地没有正式或暂存归档目录");
-      await loadFileList(scope);
+      renderDateList(scope, dates);
     } catch (error) {
       if (request !== state.fileBrowsers[scope].request) return;
       clearFileBrowser(scope, error.message);
@@ -374,7 +407,7 @@
 
   async function loadFileList(scope, requestedPath = null) {
     const profileId = $(`#${scope}-profile`).value;
-    const archiveDate = $(`#${scope}-date`).value;
+    const archiveDate = state.fileBrowsers[scope].date;
     if (!profileId || !archiveDate) return;
     const path = requestedPath === null ? state.fileBrowsers[scope].path : requestedPath;
     state.fileBrowsers[scope].path = path || "";
@@ -413,6 +446,44 @@
       body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
       $(`#${scope}-summary`).textContent = error.message;
     }
+  }
+
+  function renderDateList(scope, dates) {
+    const browserState = state.fileBrowsers[scope];
+    browserState.date = "";
+    browserState.path = "";
+    if (scope === "remote") {
+      browserState.index = null;
+      browserState.meta = null;
+    }
+    renderFileBreadcrumbs(scope, "", "", "");
+    $(`#${scope}-summary`).innerHTML = `<span><strong>归档根目录</strong></span><span>${dates.length} 个日期</span><span>点击日期文件夹进入</span>`;
+    const body = $(`#${scope}-files-body`);
+    const columns = scope === "remote" ? 6 : 5;
+    if (!dates.length) {
+      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">没有可显示的归档日期</td></tr>`;
+      return;
+    }
+    if (scope === "remote") {
+      body.innerHTML = dates.map(item => {
+        const stateInfo = statusMap[item.status] || [item.remote ? "可读取" : "未知", item.remote ? "good" : ""];
+        const localInfo = item.local ? ["本地已存在", "good"] : item.partial ? ["暂存中", "warn"] : ["未下载", ""];
+        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>归档日期</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>归档日期</td><td>${bytes(item.bytes_total)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${localInfo[1]}">${localInfo[0]}</span></td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td></tr>`;
+      }).join("");
+    } else {
+      body.innerHTML = dates.map(item => {
+        const location = item.local && item.partial ? "已验证 + 暂存" : item.local ? "已验证目录" : "暂存目录";
+        const stateInfo = statusMap[item.status] || [item.status || "未知", ""];
+        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>归档日期</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${location}</td><td>${bytes(item.bytes_total)}</td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td><td>${timeText(item.updated_at)}</td></tr>`;
+      }).join("");
+    }
+    $$(".date-link", body).forEach(button => button.addEventListener("click", () => selectFileDate(scope, button.dataset.date || "")));
+  }
+
+  function selectFileDate(scope, archiveDate) {
+    state.fileBrowsers[scope].date = archiveDate;
+    state.fileBrowsers[scope].path = "";
+    loadFileList(scope, "");
   }
 
   function renderRemoteIndex(path) {
@@ -456,9 +527,10 @@
 
   function renderFileList(scope, result) {
     const entries = result.entries || [];
+    state.fileBrowsers[scope].date = result.archive_date || state.fileBrowsers[scope].date;
     state.fileBrowsers[scope].path = result.path || "";
     const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
-    renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "");
+    renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "", result.archive_date || state.fileBrowsers[scope].date);
     $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.entry_count || 0)} 项</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
     const body = $(`#${scope}-files-body`);
     if (!entries.length) {
@@ -484,17 +556,21 @@
     $$(".folder-link", body).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
   }
 
-  function renderFileBreadcrumbs(scope, path, parentPath) {
+  function renderFileBreadcrumbs(scope, path, parentPath, archiveDate) {
     const root = $(`#${scope}-breadcrumbs`);
     const parts = path ? path.split("/") : [];
     const crumbs = [`<button class="breadcrumb root-breadcrumb" data-path="">${icon("home")}<span>归档根目录</span></button>`];
+    if (archiveDate) crumbs.push(`<span class="breadcrumb-separator">/</span><button class="breadcrumb date-breadcrumb" data-date="${escapeHtml(archiveDate)}">${escapeHtml(archiveDate)}</button>`);
     let current = "";
     parts.forEach(part => {
       current = current ? `${current}/${part}` : part;
       crumbs.push(`<span class="breadcrumb-separator">/</span><button class="breadcrumb" data-path="${escapeHtml(current)}">${escapeHtml(part)}</button>`);
     });
     root.innerHTML = crumbs.join("");
-    $$(".breadcrumb", root).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
+    $$(".root-breadcrumb", root).forEach(button => button.addEventListener("click", () => {
+      if (archiveDate) renderDateList(scope, state.fileBrowsers[scope].dates);
+    }));
+    $$(".date-breadcrumb", root).forEach(button => button.addEventListener("click", () => renderDateList(scope, state.fileBrowsers[scope].dates)));
     if (path && parentPath === path) root.dataset.invalid = "true";
   }
 
@@ -623,10 +699,6 @@
   }));
   for (const scope of ["remote", "local"]) {
     $(`#${scope}-profile`).addEventListener("change", () => loadFileDates(scope));
-    $(`#${scope}-date`).addEventListener("change", () => {
-      state.fileBrowsers[scope].path = "";
-      loadFileList(scope, "");
-    });
     $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope));
   }
   $("#scan-only").addEventListener("click", () => runScan(false));

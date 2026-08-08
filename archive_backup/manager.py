@@ -662,6 +662,7 @@ class ArchiveManager:
                 "partial": archive_date in partial_dates,
                 "status": str(row.get("status") or "unknown"),
                 "object_count": int(row.get("object_count") or 0),
+                "row_count": int(row.get("row_count") or 0),
                 "bytes_total": int(row.get("bytes_total") or 0),
                 "updated_at": str(row.get("updated_at") or ""),
             })

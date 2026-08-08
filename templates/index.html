@@ -70,14 +70,13 @@
         <section class="content-band file-browser">
           <div class="browser-toolbar">
             <label>采集服务器<select id="remote-profile"></select></label>
-            <label>归档日期<select id="remote-date" disabled><option value="">暂无日期</option></select></label>
             <button id="remote-refresh" class="button secondary">重新读取</button>
           </div>
           <div id="remote-breadcrumbs" class="file-breadcrumbs" aria-label="网盘目录位置"></div>
           <div id="remote-summary" class="browser-summary">进入页面后读取网盘日期。</div>
           <div class="table-wrap file-table-wrap">
             <table class="file-table">
-              <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>SHA-256</th></tr></thead>
+              <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>状态 / 摘要</th></tr></thead>
               <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器和归档日期</td></tr></tbody>
             </table>
           </div>
@@ -91,7 +90,6 @@
         <section class="content-band file-browser">
           <div class="browser-toolbar">
             <label>采集服务器<select id="local-profile"></select></label>
-            <label>归档日期<select id="local-date" disabled><option value="">暂无日期</option></select></label>
             <button id="local-refresh" class="button secondary">重新读取</button>
           </div>
           <div id="local-breadcrumbs" class="file-breadcrumbs" aria-label="本地目录位置"></div>
