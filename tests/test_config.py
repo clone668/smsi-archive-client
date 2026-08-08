@@ -29,3 +29,30 @@ def test_password_minimum_is_six_characters(tmp_path) -> None:
     store.change_password("123456")
     with pytest.raises(ValueError, match="至少需要 6 个字符"):
         store.change_password("12345")
+
+
+def test_sftp_profile_requires_key_and_known_hosts() -> None:
+    profile = ProfileConfig(
+        profile_id="collector-a",
+        display_name="A",
+        collector_id="collector-a",
+        source_type="ubuntu_sftp",
+        sftp_host="192.168.2.240",
+    )
+    errors = profile.validate()
+    assert "Ubuntu SFTP 私钥文件不能为空" in errors
+    assert "Ubuntu SFTP known_hosts 文件不能为空" in errors
+
+
+def test_sftp_profile_builds_collector_root() -> None:
+    profile = ProfileConfig(
+        profile_id="collector-a",
+        display_name="A",
+        collector_id="collector-a",
+        source_type="ubuntu_sftp",
+        sftp_host="192.168.2.240",
+        sftp_key_file="client.key",
+        sftp_known_hosts_file="known_hosts",
+    )
+    assert profile.validate() == []
+    assert profile.sftp_archive_root == "/archive/collector=collector-a"

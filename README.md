@@ -1,6 +1,6 @@
 # SMSI 归档备份客户端
 
-跨平台、只读的 SMSI 长期归档下载与验证客户端。Ubuntu 负责全天从 Google Drive 拉取并生成已验证本地副本；Windows 可在工作时间从 Ubuntu 的只读共享目录复制这些已验证归档。
+跨平台、只读的 SMSI 长期归档下载与验证客户端。Ubuntu 负责全天从 Google Drive 拉取并生成已验证本地副本；Windows 可在工作时间通过局域网只读 SFTP 下载这些已验证归档。
 
 ## 数据路径
 
@@ -27,7 +27,7 @@
 4. 再次运行 `Windows一键启动.cmd`，打开 `http://127.0.0.1:8788/`。
 5. 初始密码位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\initial-password.txt`。
 
-Windows 若从 Ubuntu 复制，请先把 Ubuntu 已验证归档目录以只读 SMB/NFS 方式挂载到 Windows，再将来源设为“已验证目录”。来源根目录应直接指向对应的 `collector=<id>` 目录。
+Windows 从 Ubuntu 内网下载时，在来源中选择“Ubuntu 内网（SFTP）”，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。客户端仍会重新执行对象 SHA-256、Parquet schema、行数和业务内容摘要校验；Ubuntu 删除源文件不会删除 Windows 已验证副本。
 
 ## Ubuntu
 
@@ -53,6 +53,14 @@ sudo systemctl start smsi-archive-client
 systemctl status smsi-archive-client
 journalctl -u smsi-archive-client -n 100 --no-pager
 ```
+
+为 Windows 启用 Ubuntu 只读 SFTP：
+
+```bash
+sudo bash deploy/setup_sftp_reader.sh /path/to/windows-client.pub
+```
+
+脚本创建无密码、无命令执行权限的 `smsi-archive-reader` 用户，并将 `/data/smsi-archive` 只读映射为该用户唯一可见的 `/archive`。Windows 私钥不得上传到 Ubuntu 或提交到 Git。
 
 ## 开发测试
 

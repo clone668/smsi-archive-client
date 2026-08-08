@@ -18,6 +18,8 @@ CONFIG_VERSION = 1
 MIN_PASSWORD_LENGTH = 6
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
+HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+SFTP_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
 
 
 def app_data_dir() -> Path:
@@ -76,6 +78,12 @@ class ProfileConfig:
     drive_remote: str = "gdrive:"
     drive_prefix: str = "smsi/v3"
     verified_source_root: str = ""
+    sftp_host: str = ""
+    sftp_port: int = 22
+    sftp_user: str = "smsi-archive-reader"
+    sftp_key_file: str = ""
+    sftp_known_hosts_file: str = ""
+    sftp_root: str = "/archive"
 
     @property
     def drive_root(self) -> str:
@@ -83,6 +91,10 @@ class ProfileConfig:
             f"{self.drive_remote}{self.drive_prefix.strip('/')}"
             f"/collector={self.collector_id}"
         )
+
+    @property
+    def sftp_archive_root(self) -> str:
+        return f"{self.sftp_root.rstrip('/')}/collector={self.collector_id}"
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -92,15 +104,32 @@ class ProfileConfig:
             errors.append("配置名称不能为空")
         if not IDENTITY_RE.fullmatch(self.collector_id):
             errors.append("采集服务器 ID 无效")
-        if self.source_type not in {"google_drive", "verified_directory"}:
+        if self.source_type not in {"google_drive", "verified_directory", "ubuntu_sftp"}:
             errors.append("归档来源类型无效")
         elif self.source_type == "google_drive":
             if not REMOTE_RE.fullmatch(self.drive_remote):
                 errors.append("Google Drive remote 应类似 gdrive:")
             if not _valid_prefix(self.drive_prefix):
                 errors.append("Google Drive 前缀无效")
-        elif not self.verified_source_root.strip():
-            errors.append("已验证目录来源不能为空")
+        elif self.source_type == "verified_directory":
+            if not self.verified_source_root.strip():
+                errors.append("已验证目录来源不能为空")
+        else:
+            if not HOST_RE.fullmatch(self.sftp_host):
+                errors.append("Ubuntu SFTP 主机无效")
+            if not 1 <= int(self.sftp_port) <= 65535:
+                errors.append("Ubuntu SFTP 端口无效")
+            if not SFTP_USER_RE.fullmatch(self.sftp_user):
+                errors.append("Ubuntu SFTP 用户无效")
+            if not self.sftp_key_file.strip():
+                errors.append("Ubuntu SFTP 私钥文件不能为空")
+            if not self.sftp_known_hosts_file.strip():
+                errors.append("Ubuntu SFTP known_hosts 文件不能为空")
+            if (
+                not self.sftp_root.startswith("/")
+                or not _valid_prefix(self.sftp_root)
+            ):
+                errors.append("Ubuntu SFTP 根目录无效")
         return errors
 
     @classmethod
@@ -114,6 +143,12 @@ class ProfileConfig:
             drive_remote=str(value.get("drive_remote") or "gdrive:").strip(),
             drive_prefix=str(value.get("drive_prefix") or "smsi/v3").strip("/"),
             verified_source_root=str(value.get("verified_source_root") or "").strip(),
+            sftp_host=str(value.get("sftp_host") or "").strip(),
+            sftp_port=int(value.get("sftp_port") or 22),
+            sftp_user=str(value.get("sftp_user") or "smsi-archive-reader").strip(),
+            sftp_key_file=str(value.get("sftp_key_file") or "").strip(),
+            sftp_known_hosts_file=str(value.get("sftp_known_hosts_file") or "").strip(),
+            sftp_root="/" + str(value.get("sftp_root") or "/archive").strip("/"),
         )
 
 

@@ -64,9 +64,7 @@ class ArchiveSource(ABC):
         raise NotImplementedError
 
 
-class RcloneDriveSource(ArchiveSource):
-    name = "google_drive"
-
+class RcloneSource(ArchiveSource):
     def __init__(self, config: ClientConfig, profile: ProfileConfig) -> None:
         self.config = config
         self.profile = profile
@@ -76,10 +74,19 @@ class RcloneDriveSource(ArchiveSource):
     def _creation_flags() -> int:
         return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+    def _source_root(self) -> str:
+        raise NotImplementedError
+
+    def _backend_flags(self) -> list[str]:
+        return []
+
     def _remote_path(self, relative_key: str = "") -> str:
         if not relative_key:
-            return self.profile.drive_root.rstrip("/")
-        return f"{self.profile.drive_root.rstrip('/')}/{safe_relative_key(relative_key)}"
+            return self._source_root().rstrip("/")
+        return f"{self._source_root().rstrip('/')}/{safe_relative_key(relative_key)}"
+
+    def _command(self, arguments: list[str]) -> list[str]:
+        return [self.binary, *arguments, *self._backend_flags()]
 
     def _run(
         self,
@@ -91,7 +98,7 @@ class RcloneDriveSource(ArchiveSource):
     ) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(
-                [self.binary, *arguments],
+                self._command(arguments),
                 capture_output=True,
                 text=not binary_output,
                 encoding=None if binary_output else "utf-8",
@@ -161,7 +168,7 @@ class RcloneDriveSource(ArchiveSource):
         if limit:
             arguments.extend(["--bwlimit", limit])
         process = subprocess.Popen(
-            [self.binary, *arguments],
+            self._command(arguments),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -197,6 +204,30 @@ class RcloneDriveSource(ArchiveSource):
         if not destination.is_file():
             raise RuntimeError(f"rclone 未生成目标文件: {relative_key}")
         return destination.stat().st_size
+
+
+class RcloneDriveSource(RcloneSource):
+    name = "google_drive"
+
+    def _source_root(self) -> str:
+        return self.profile.drive_root
+
+
+class RcloneSftpSource(RcloneSource):
+    name = "ubuntu_sftp"
+
+    def _source_root(self) -> str:
+        return f":sftp:{self.profile.sftp_archive_root}"
+
+    def _backend_flags(self) -> list[str]:
+        return [
+            "--sftp-host", self.profile.sftp_host,
+            "--sftp-port", str(self.profile.sftp_port),
+            "--sftp-user", self.profile.sftp_user,
+            "--sftp-key-file", str(Path(self.profile.sftp_key_file).expanduser()),
+            "--sftp-known-hosts-file", str(Path(self.profile.sftp_known_hosts_file).expanduser()),
+            "--sftp-disable-hashcheck",
+        ]
 
 
 class VerifiedDirectorySource(ArchiveSource):
@@ -279,4 +310,6 @@ def build_source(config: ClientConfig, profile: ProfileConfig) -> ArchiveSource:
         return RcloneDriveSource(config, profile)
     if profile.source_type == "verified_directory":
         return VerifiedDirectorySource(profile)
+    if profile.source_type == "ubuntu_sftp":
+        return RcloneSftpSource(config, profile)
     raise RuntimeError(f"不支持的来源类型: {profile.source_type}")
