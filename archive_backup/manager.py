@@ -616,6 +616,211 @@ class ArchiveManager:
             "objects": objects,
         }
 
+    def browse_dates(self, profile_id: str, *, scope: str) -> dict[str, Any]:
+        """List remote or local archive dates on explicit user request."""
+        if scope not in {"remote", "local"}:
+            raise RuntimeError("文件范围无效")
+        profile = next(
+            (item for item in self.config.profiles if item.profile_id == profile_id),
+            None,
+        )
+        if profile is None:
+            raise RuntimeError("配置不存在")
+        root = self.profile_root(profile)
+        local_dates = {
+            item.name.removeprefix("date=")
+            for item in root.glob("date=*")
+            if item.is_dir() and DATE_RE.fullmatch(item.name.removeprefix("date="))
+        }
+        partial_root = root / ".partial"
+        partial_dates = {
+            item.name.removeprefix("date=")
+            for item in partial_root.glob("date=*")
+            if item.is_dir() and DATE_RE.fullmatch(item.name.removeprefix("date="))
+        } if partial_root.is_dir() else set()
+        remote_dates: set[str] = set()
+        if scope == "remote":
+            source = build_source(self.config, profile)
+            remote_dates = {
+                value for value in source.list_dates() if DATE_RE.fullmatch(value)
+            }
+        rows = {
+            str(item["archive_date"]): item
+            for item in self.database.days(5000)
+            if item.get("profile_id") == profile_id
+        }
+        dates = []
+        available_dates = (
+            remote_dates if scope == "remote" else local_dates | partial_dates
+        )
+        for archive_date in sorted(available_dates, reverse=True):
+            row = rows.get(archive_date) or {}
+            dates.append({
+                "archive_date": archive_date,
+                "remote": archive_date in remote_dates,
+                "local": archive_date in local_dates,
+                "partial": archive_date in partial_dates,
+                "status": str(row.get("status") or "unknown"),
+                "object_count": int(row.get("object_count") or 0),
+                "bytes_total": int(row.get("bytes_total") or 0),
+                "updated_at": str(row.get("updated_at") or ""),
+            })
+        return {
+            "scope": scope,
+            "profile_id": profile_id,
+            "source_type": profile.source_type,
+            "dates": dates,
+        }
+
+    def browse_files(
+        self,
+        profile_id: str,
+        archive_date: str,
+        *,
+        scope: str,
+    ) -> dict[str, Any]:
+        """Browse one date's remote manifest or actual local files."""
+        if scope not in {"remote", "local"}:
+            raise RuntimeError("文件范围无效")
+        profile = next(
+            (item for item in self.config.profiles if item.profile_id == profile_id),
+            None,
+        )
+        if profile is None:
+            raise RuntimeError("配置不存在")
+        try:
+            date.fromisoformat(archive_date)
+        except ValueError as exc:
+            raise RuntimeError("归档日期无效") from exc
+        final = self.final_root(profile, archive_date)
+        stage = self.staging_root(profile, archive_date)
+        if scope == "remote":
+            source = build_source(self.config, profile)
+            snapshot, remote_state, remote_detail = self._remote_snapshot(
+                source, profile, archive_date
+            )
+            files: list[dict[str, Any]] = []
+            if snapshot is not None:
+                for item in snapshot.objects:
+                    key = str(item["relative_key"])
+                    local_path = local_object_path(final, key, archive_date)
+                    staged_path = local_object_path(stage, key, archive_date)
+                    expected_size = int(item["size_bytes"])
+                    if local_path.is_file():
+                        local_state = (
+                            "present"
+                            if local_path.stat().st_size == expected_size
+                            else "mismatch"
+                        )
+                    elif staged_path.is_file():
+                        local_state = (
+                            "staged"
+                            if staged_path.stat().st_size == expected_size
+                            else "mismatch"
+                        )
+                    elif staged_path.with_name(
+                        staged_path.name + ".downloading"
+                    ).is_file():
+                        local_state = "downloading"
+                    else:
+                        local_state = "missing"
+                    files.append({
+                        "path": key,
+                        "name": PurePosixPath(key).name,
+                        "size_bytes": expected_size,
+                        "row_count": int(item.get("row_count") or 0),
+                        "kind": str(item.get("kind") or ""),
+                        "table_name": str(item.get("table_name") or ""),
+                        "sha256": str(item.get("sha256") or ""),
+                        "local_state": local_state,
+                    })
+            return {
+                "scope": scope,
+                "profile_id": profile_id,
+                "archive_date": archive_date,
+                "state": "ready" if snapshot is not None else remote_state,
+                "detail": remote_detail,
+                "object_count": len(files),
+                "bytes_total": sum(int(item["size_bytes"]) for item in files),
+                "row_count": snapshot.row_count if snapshot else 0,
+                "files": files,
+            }
+
+        expected: dict[str, dict[str, Any]] = {}
+        local_snapshot: ManifestSnapshot | None = None
+        manifest_error = ""
+        for manifest_path in (final / "manifest.json", stage / "manifest.json"):
+            if not manifest_path.is_file():
+                continue
+            try:
+                if manifest_path.stat().st_size > 32 * 1024 * 1024:
+                    raise RuntimeError("本地 manifest 超过安全大小")
+                local_snapshot = parse_manifest(
+                    manifest_path.read_bytes(), archive_date
+                )
+            except (OSError, RuntimeError) as exc:
+                manifest_error = str(exc)
+                continue
+            break
+        if local_snapshot is not None:
+            prefix = f"date={archive_date}/"
+            for item in local_snapshot.objects:
+                key = str(item["relative_key"])
+                expected[key.removeprefix(prefix)] = item
+        control_files = {
+            "manifest.json",
+            ".smsi-verified.json",
+            ".smsi-verification-failed.json",
+        }
+        files = []
+        for location, root in (("verified", final), ("partial", stage)):
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                if len(files) >= 5000:
+                    raise RuntimeError("本地文件超过 5000 个，请缩小浏览范围")
+                relative = path.relative_to(root).as_posix()
+                file_state = "downloading" if path.name.endswith(".downloading") else location
+                manifest_relative = (
+                    relative.removesuffix(".downloading")
+                    if file_state == "downloading"
+                    else relative
+                )
+                item = expected.get(manifest_relative) or {}
+                files.append({
+                    "path": relative,
+                    "name": path.name,
+                    "size_bytes": path.stat().st_size,
+                    "modified_at": datetime.fromtimestamp(
+                        path.stat().st_mtime, timezone.utc
+                    ).isoformat().replace("+00:00", "Z"),
+                    "location": location,
+                    "state": file_state,
+                    "remote_state": (
+                        "listed" if item
+                        else "control" if relative in control_files
+                        else "local_only"
+                    ),
+                    "expected_size": int(item.get("size_bytes") or 0),
+                })
+        return {
+            "scope": scope,
+            "profile_id": profile_id,
+            "archive_date": archive_date,
+            "state": str((self.database.day(profile_id, archive_date) or {}).get("status") or "unknown"),
+            "detail": (
+                f"本地 manifest 无法解析: {manifest_error}"
+                if manifest_error and local_snapshot is None
+                else "本地已验证目录与暂存目录"
+            ),
+            "object_count": len(files),
+            "bytes_total": sum(int(item["size_bytes"]) for item in files),
+            "row_count": local_snapshot.row_count if local_snapshot else 0,
+            "files": files,
+        }
+
     def scan_profile(self, profile: ProfileConfig, *, download: bool) -> dict[str, Any]:
         source = build_source(self.config, profile)
         dates = self._eligible_dates(source)

@@ -165,9 +165,44 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "detail": database_manager.day_detail(profile_id, archive_date),
         })
 
+    @app.get("/api/files/dates")
+    def api_file_dates():
+        profile_id = str(request.args.get("profile_id") or "").strip()
+        scope = str(request.args.get("scope") or "").strip()
+        if not profile_id or not scope:
+            raise ValueError("缺少文件浏览参数")
+        manager = ArchiveManager(config_store.load(), database)
+        return jsonify({
+            "ok": True,
+            "result": manager.browse_dates(profile_id, scope=scope),
+        })
+
+    @app.get("/api/files/list")
+    def api_file_list():
+        profile_id = str(request.args.get("profile_id") or "").strip()
+        archive_date = str(request.args.get("archive_date") or "").strip()
+        scope = str(request.args.get("scope") or "").strip()
+        if not profile_id or not archive_date or not scope:
+            raise ValueError("缺少文件浏览参数")
+        manager = ArchiveManager(config_store.load(), database)
+        return jsonify({
+            "ok": True,
+            "result": manager.browse_files(
+                profile_id, archive_date, scope=scope
+            ),
+        })
+
     @app.get("/api/update/check")
     def api_update_check():
         return jsonify({"ok": True, "updates": updater.check()})
+
+    @app.get("/api/update/status")
+    def api_update_status():
+        return jsonify({
+            "ok": True,
+            "updates": updater.status(),
+            "archive_running": bool(service.status().get("running")),
+        })
 
     @app.post("/api/update/download")
     def api_update_download():

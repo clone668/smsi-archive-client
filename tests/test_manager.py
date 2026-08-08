@@ -246,3 +246,48 @@ def test_cancel_marks_day_cancelled_and_keeps_staging(tmp_path, archive_fixture,
     assert "下次可继续" in row["detail"]
     assert manager.staging_root(profile, fixture["archive_date"]).exists()
     assert not manager.final_root(profile, fixture["archive_date"]).exists()
+
+
+def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+
+    dates = manager.browse_dates(profile.profile_id, scope="remote")
+    result = manager.browse_files(
+        profile.profile_id, fixture["archive_date"], scope="remote"
+    )
+
+    assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
+    assert result["state"] == "ready"
+    assert result["object_count"] == 1
+    assert result["files"][0]["path"] == fixture["relative_key"]
+    assert result["files"][0]["local_state"] == "missing"
+
+
+def test_local_file_browser_does_not_access_remote(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, tmp_path / "unavailable-source")
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    stage = manager.staging_root(profile, fixture["archive_date"])
+    target = stage / "business" / "table=price_data" / "day"
+    target.mkdir(parents=True)
+    (stage / "manifest.json").write_bytes(fixture["manifest_raw"])
+    downloading = target / "part-00000.parquet.downloading"
+    downloading.write_bytes(b"partial")
+    monkeypatch.setattr(
+        "archive_backup.manager.build_source",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("remote access")),
+    )
+
+    dates = manager.browse_dates(profile.profile_id, scope="local")
+    result = manager.browse_files(
+        profile.profile_id, fixture["archive_date"], scope="local"
+    )
+
+    assert dates["dates"][0]["partial"] is True
+    assert result["object_count"] == 2
+    assert any(item["state"] == "downloading" for item in result["files"])
+    assert any(item["remote_state"] == "control" for item in result["files"])

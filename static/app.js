@@ -1,6 +1,13 @@
 (() => {
   "use strict";
-  const state = { csrf: "", config: null, runtime: null, updates: null, days: [], events: [], timer: null };
+  const state = {
+    csrf: "", config: null, runtime: null, updates: null, days: [], events: [],
+    timer: null, updateTimer: null,
+    fileBrowsers: {
+      remote: { request: 0 },
+      local: { request: 0 },
+    },
+  };
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
@@ -22,6 +29,10 @@
     remote_failed: ["远端失败", "bad"], error: ["处理失败", "bad"], manifest_changed: ["清单已变化", "bad"],
     cancelled: ["已取消", "warn"],
     unknown: ["未知", ""],
+  };
+  const updatePhaseMap = {
+    idle: "等待操作", checking: "正在检查版本", downloading: "正在下载更新包",
+    verifying: "正在校验更新包", ready: "更新已准备", failed: "更新失败",
   };
   let toastTimer;
 
@@ -151,76 +162,221 @@
   function renderUpdates() {
     const updates = state.updates || {};
     const latest = updates.latest || {};
-    const check = $("#check-update");
-    const download = $("#download-update");
-    const restart = $("#restart-update");
-    const status = $("#update-status");
-    if (!check || !download || !restart || !status) return;
+    const operation = updates.operation || {};
     const current = String(updates.current_revision || "未知").slice(0, 12);
     const remote = String(latest.revision || "").slice(0, 12);
     const staged = String(updates.staged_revision || "").slice(0, 12);
-    if (staged) {
-      const busy = !!state.runtime?.running;
-      status.textContent = busy ? `已更新 ${staged}，归档任务完成后可重启 · 当前 ${current}` : `已更新 ${staged}，可重启客户端 · 当前 ${current}`;
-      status.className = "update-status ready";
-      download.classList.add("hidden");
-      restart.classList.remove("hidden");
-      restart.disabled = busy;
+    const phase = String(operation.phase || "idle");
+    const active = !!operation.active;
+    const archiveBusy = !!state.runtime?.running;
+    let label = "未检查";
+    let tone = "";
+    let status = `当前版本 ${current}，尚未检查远端版本。`;
+    if (active) {
+      label = updatePhaseMap[phase] || "更新进行中";
+      tone = "warn";
+      status = String(operation.detail || label);
+    } else if (phase === "failed") {
+      label = "更新失败";
+      tone = "bad";
+      status = String(operation.error || operation.detail || "更新操作失败");
+    } else if (staged) {
+      label = "待重启";
+      tone = "good";
+      status = archiveBusy ? `版本 ${staged} 已准备，归档任务完成后可重启。` : `版本 ${staged} 已准备，可以重启客户端。`;
     } else if (remote && updates.update_available) {
-      status.textContent = `发现新版本 ${remote} · 当前 ${current}`;
-      status.className = "update-status available";
-      download.classList.remove("hidden");
-      restart.classList.add("hidden");
-      restart.disabled = false;
+      label = "有新版本";
+      tone = "warn";
+      status = `发现版本 ${remote}，当前运行 ${current}。`;
     } else if (remote) {
-      status.textContent = `已是最新版本 ${remote}`;
-      status.className = "update-status current";
-      download.classList.add("hidden");
-      restart.classList.add("hidden");
-      restart.disabled = false;
-    } else {
-      status.textContent = `当前版本 ${current} · 尚未检查`;
-      status.className = "update-status";
-      download.classList.add("hidden");
-      restart.classList.add("hidden");
-      restart.disabled = false;
+      label = "已是最新";
+      tone = "good";
+      status = `当前已运行最新版本 ${remote}。`;
+    }
+
+    $("#update-current").textContent = current;
+    $("#update-latest").textContent = remote || "--";
+    $("#update-release-note").textContent = latest.message || "尚未读取版本说明";
+    $("#update-state-text").textContent = label;
+    $("#update-status").textContent = status;
+    $("#update-state").textContent = label;
+    $("#update-state").className = `state-pill ${tone}`.trim();
+    $("#nav-update-state").textContent = label;
+    $("#check-update").disabled = active;
+    $("#download-update").disabled = active || !updates.update_available || !!staged;
+    $("#restart-update").disabled = active || !staged || archiveBusy || !updates.helper_available;
+    $("#restart-hint").textContent = !updates.helper_available
+      ? "Ubuntu 更新助手不可用"
+      : archiveBusy && staged
+        ? "归档任务结束后可重启"
+        : staged ? "更新已准备，可以安全切换" : "更新准备完成后启用";
+
+    const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
+    const track = $("#update-progress-track");
+    const indeterminate = active && percent === null;
+    track.classList.toggle("indeterminate", indeterminate);
+    $("#update-progress-bar").style.width = `${percent ?? (staged ? 100 : 0)}%`;
+    track.setAttribute("aria-valuenow", percent == null ? "0" : String(percent));
+    track.setAttribute("aria-valuetext", indeterminate ? label : `${percent ?? (staged ? 100 : 0)}%`);
+    $("#update-phase").textContent = updatePhaseMap[phase] || label;
+    $("#update-percent").textContent = percent == null ? (active ? "处理中" : staged ? "100%" : "--") : `${percent.toFixed(percent % 1 ? 1 : 0)}%`;
+    const done = Number(operation.bytes_done || 0);
+    const total = Number(operation.bytes_total || 0);
+    $("#update-bytes").textContent = total ? `${bytes(done)} / ${bytes(total)}` : done ? `已处理 ${bytes(done)}` : "数据量 --";
+    $("#update-speed").textContent = Number(operation.speed_bytes_per_second || 0) > 0 ? `${bytes(operation.speed_bytes_per_second)}/秒` : "速度 --";
+    $("#update-eta").textContent = operation.eta_seconds != null ? `剩余约 ${durationText(operation.eta_seconds)}` : "剩余时间 --";
+    $("#update-detail").textContent = operation.error || operation.detail || (staged ? "更新包已完成下载和校验，等待手动重启。" : "尚未开始更新操作。");
+    $("#update-detail").className = `update-detail${phase === "failed" ? " error" : ""}`;
+  }
+
+  async function pollUpdateStatus() {
+    try {
+      const result = await api("/api/update/status");
+      state.updates = result.updates;
+      state.runtime = { ...(state.runtime || {}), running: !!result.archive_running };
+      renderUpdates();
+    } catch (error) {
+      $("#update-detail").textContent = error.message;
+      $("#update-detail").className = "update-detail error";
     }
   }
 
+  function startUpdatePolling() {
+    clearInterval(state.updateTimer);
+    state.updateTimer = setInterval(pollUpdateStatus, 750);
+  }
+
+  function stopUpdatePolling() {
+    clearInterval(state.updateTimer);
+    state.updateTimer = null;
+  }
+
   async function checkUpdate() {
-    const button = $("#check-update");
-    button.disabled = true;
+    state.updates.operation = { active: true, phase: "checking", detail: "正在检查 GitHub 最新版本" };
+    renderUpdates();
+    startUpdatePolling();
     try {
       const result = await api("/api/update/check");
       state.updates = result.updates;
       renderUpdates();
       toast(result.updates.update_available ? "发现新版本" : "当前已是最新版本");
     } catch (error) { toast(error.message, true); }
-    finally { button.disabled = false; }
+    finally { stopUpdatePolling(); await pollUpdateStatus(); }
   }
 
   async function downloadUpdate() {
     const revision = state.updates?.latest?.revision;
     if (!revision) return toast("请先检查更新", true);
-    const button = $("#download-update");
-    button.disabled = true;
+    state.updates.operation = { active: true, phase: "checking", detail: "正在确认目标版本" };
+    renderUpdates();
+    startUpdatePolling();
     try {
       const result = await api("/api/update/download", { method: "POST", body: JSON.stringify({ revision }) });
       state.updates = result.updates;
       renderUpdates();
       toast("更新已准备，归档任务空闲后可重启客户端");
     } catch (error) { toast(error.message, true); }
-    finally { button.disabled = false; }
+    finally { stopUpdatePolling(); await pollUpdateStatus(); }
   }
 
   async function restartUpdate() {
-    if (!window.confirm("仅在归档任务空闲时切换更新并重启客户端，继续吗？")) return;
     const button = $("#restart-update");
     button.disabled = true;
     try {
       await api("/api/update/restart", { method: "POST", body: "{}" });
       toast("更新已切换，客户端正在重启");
     } catch (error) { toast(error.message, true); button.disabled = false; }
+  }
+
+  function renderFileProfileOptions() {
+    const profiles = state.config?.profiles || [];
+    for (const scope of ["remote", "local"]) {
+      const select = $(`#${scope}-profile`);
+      const previous = select.value;
+      select.innerHTML = profiles.length
+        ? profiles.map(item => `<option value="${escapeHtml(item.profile_id)}">${escapeHtml(item.display_name)}</option>`).join("")
+        : '<option value="">尚未配置采集服务器</option>';
+      select.disabled = !profiles.length;
+      if (profiles.some(item => item.profile_id === previous)) select.value = previous;
+    }
+  }
+
+  function clearFileBrowser(scope, message) {
+    const dateSelect = $(`#${scope}-date`);
+    dateSelect.innerHTML = '<option value="">暂无日期</option>';
+    dateSelect.disabled = true;
+    $(`#${scope}-summary`).textContent = message;
+    const columns = scope === "remote" ? 6 : 5;
+    $(`#${scope}-files-body`).innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(message)}</td></tr>`;
+  }
+
+  async function loadFileDates(scope) {
+    const profileId = $(`#${scope}-profile`).value;
+    if (!profileId) return clearFileBrowser(scope, "请先在设置中添加采集服务器");
+    const request = ++state.fileBrowsers[scope].request;
+    clearFileBrowser(scope, scope === "remote" ? "正在读取网盘日期..." : "正在读取本地日期...");
+    try {
+      const query = new URLSearchParams({ profile_id: profileId, scope });
+      const payload = await api(`/api/files/dates?${query}`);
+      if (request !== state.fileBrowsers[scope].request) return;
+      const dates = payload.result.dates || [];
+      const select = $(`#${scope}-date`);
+      select.innerHTML = dates.length
+        ? dates.map(item => `<option value="${escapeHtml(item.archive_date)}">${escapeHtml(item.archive_date)}</option>`).join("")
+        : '<option value="">暂无日期</option>';
+      select.disabled = !dates.length;
+      if (!dates.length) return clearFileBrowser(scope, scope === "remote" ? "网盘中没有可浏览的归档日期" : "本地没有正式或暂存归档目录");
+      await loadFileList(scope);
+    } catch (error) {
+      if (request !== state.fileBrowsers[scope].request) return;
+      clearFileBrowser(scope, error.message);
+    }
+  }
+
+  async function loadFileList(scope) {
+    const profileId = $(`#${scope}-profile`).value;
+    const archiveDate = $(`#${scope}-date`).value;
+    if (!profileId || !archiveDate) return;
+    const request = ++state.fileBrowsers[scope].request;
+    const columns = scope === "remote" ? 6 : 5;
+    const body = $(`#${scope}-files-body`);
+    body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">正在读取文件列表...</td></tr>`;
+    $(`#${scope}-summary`).textContent = `正在读取 ${archiveDate}...`;
+    try {
+      const query = new URLSearchParams({ profile_id: profileId, archive_date: archiveDate, scope });
+      const payload = await api(`/api/files/list?${query}`);
+      if (request !== state.fileBrowsers[scope].request) return;
+      renderFileList(scope, payload.result);
+    } catch (error) {
+      if (request !== state.fileBrowsers[scope].request) return;
+      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(error.message)}</td></tr>`;
+      $(`#${scope}-summary`).textContent = error.message;
+    }
+  }
+
+  function renderFileList(scope, result) {
+    const files = result.files || [];
+    const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
+    $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.object_count || 0)} 个文件</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
+    const body = $(`#${scope}-files-body`);
+    if (!files.length) {
+      const columns = scope === "remote" ? 6 : 5;
+      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">该日期没有可显示的文件</td></tr>`;
+      return;
+    }
+    if (scope === "remote") {
+      body.innerHTML = files.map(item => {
+        const local = localObjectStatus[item.local_state] || [item.local_state || "未知", ""];
+        const type = [item.kind, item.table_name].filter(Boolean).join(" · ") || "归档对象";
+        return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
+      }).join("");
+      return;
+    }
+    body.innerHTML = files.map(item => {
+      const location = item.state === "downloading" ? ["下载中", "warn"] : item.location === "verified" ? ["已验证目录", "good"] : ["暂存目录", "warn"];
+      const remote = item.remote_state === "listed" ? ["已列入", "good"] : item.remote_state === "control" ? ["控制文件", ""] : ["仅本地", "warn"];
+      return `<tr><td><span class="file-name">${escapeHtml(item.name)}</span><span class="file-path">${escapeHtml(item.path)}</span></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
+    }).join("");
   }
 
   function profileTemplate(profile, index) {
@@ -300,7 +456,15 @@
       minimum_free_bytes: Number(form.elements.minimum_free_gib.value) * 1073741824, auto_download: form.elements.auto_download.checked,
       web_host: form.elements.web_host.value.trim(), web_port: Number(form.elements.web_port.value), profiles: collectProfiles(),
     };
-    try { const result = await api("/api/config", { method: "PUT", body: JSON.stringify(payload) }); state.config = result.config; populateSettings(); toast("设置已保存"); }
+    try {
+      const result = await api("/api/config", { method: "PUT", body: JSON.stringify(payload) });
+      state.config = result.config;
+      populateSettings();
+      renderFileProfileOptions();
+      state.fileBrowsers.remote.request += 1;
+      state.fileBrowsers.local.request += 1;
+      toast("设置已保存");
+    }
     catch (error) { toast(error.message, true); }
   }
 
@@ -326,15 +490,23 @@
   async function bootstrap() {
     const result = await api("/api/bootstrap");
     state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.events = result.events;
-    renderAll(); renderUpdates(); populateSettings();
+    renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);
   }
 
-  $$(".tab").forEach(button => button.addEventListener("click", () => {
-    $$(".tab").forEach(item => item.classList.toggle("active", item === button));
+  $$(".nav-item").forEach(button => button.addEventListener("click", () => {
+    $$(".nav-item").forEach(item => item.classList.toggle("active", item === button));
     $$(".page").forEach(page => page.classList.toggle("active", page.id === `${button.dataset.page}-page`));
+    if (button.dataset.page === "remote-files") loadFileDates("remote");
+    if (button.dataset.page === "local-files") loadFileDates("local");
+    if (button.dataset.page === "updates") pollUpdateStatus();
   }));
+  for (const scope of ["remote", "local"]) {
+    $(`#${scope}-profile`).addEventListener("change", () => loadFileDates(scope));
+    $(`#${scope}-date`).addEventListener("change", () => loadFileList(scope));
+    $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope));
+  }
   $("#scan-only").addEventListener("click", () => runScan(false));
   $("#scan-download").addEventListener("click", () => runScan(true));
   $("#cancel-task").addEventListener("click", async () => { try { await api("/api/actions/cancel", { method: "POST", body: "{}" }); toast("已请求取消任务"); } catch (error) { toast(error.message, true); } });

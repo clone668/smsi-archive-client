@@ -92,3 +92,42 @@ def test_update_status_is_exposed_without_network(tmp_path) -> None:
         assert response.get_json()["updates"]["update_available"] is True
     finally:
         app.extensions["smsi_archive_service"].stop()
+
+
+def test_file_browser_endpoints_require_scope_and_return_inventory(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    store = ConfigStore(tmp_path / "state")
+    security = store.load()
+    store.save(ClientConfig(
+        local_root=str(tmp_path / "local"),
+        auto_download=False,
+        profiles=[ProfileConfig(
+            profile_id="collector-a",
+            display_name="A",
+            collector_id="collector-a",
+            source_type="verified_directory",
+            verified_source_root=str(fixture["source_root"]),
+        )],
+        password_hash=security.password_hash,
+        session_secret=security.session_secret,
+    ))
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    try:
+        password = store.initial_password_path.read_text(encoding="utf-8").strip()
+        assert client.post("/login", data={"password": password}).status_code == 302
+        assert client.get("/api/files/dates?profile_id=collector-a").status_code == 400
+        dates = client.get(
+            "/api/files/dates?profile_id=collector-a&scope=remote"
+        ).get_json()["result"]
+        files = client.get(
+            f"/api/files/list?profile_id=collector-a&archive_date={fixture['archive_date']}&scope=remote"
+        ).get_json()["result"]
+        assert dates["scope"] == "remote"
+        assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
+        assert files["object_count"] == 1
+    finally:
+        app.extensions["smsi_archive_service"].stop()
