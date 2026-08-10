@@ -11,13 +11,20 @@
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark small">S</span><span><b>SMSI</b><small>归档中心 · v{{ client_version }}</small></span></div>
       <nav class="side-nav" aria-label="主导航">
-        <button class="nav-item active" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>总览</b><small>归档与存储状态</small></span></button>
-        <button class="nav-item" data-page="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span><b>下载任务</b><small>进度与执行记录</small></span></button>
-        <button class="nav-item" data-page="remote-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z"/></svg><span><b>网盘文件</b><small>Google Drive</small></span></button>
+        <span class="nav-section-label">文件</span>
+        <button class="nav-item active" data-page="remote-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z"/></svg><span><b>Google Drive</b><small>云端归档</small></span></button>
         <button class="nav-item" data-page="local-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>本地归档</b><small>已验证与暂存</small></span></button>
+        <span class="nav-section-label">管理</span>
+        <button class="nav-item" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>运行总览</b><small>归档与存储状态</small></span></button>
+        <button class="nav-item" data-page="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span><b>传输任务</b><small id="nav-job-state">当前空闲</small></span></button>
         <button class="nav-item" data-page="updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg><span><b>客户端更新</b><small id="nav-update-state">检查版本</small></span></button>
         <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span><b>设置</b><small>来源与运行策略</small></span></button>
       </nav>
+      <div class="sidebar-storage">
+        <div><span>本地存储</span><strong id="sidebar-storage-label">--</strong></div>
+        <div class="storage-track"><span id="sidebar-storage-bar"></span></div>
+        <small id="sidebar-storage-detail">正在读取磁盘状态</small>
+      </div>
       <div class="sidebar-footer">
         <span id="connection-state" class="status-dot neutral">连接中</span>
         <button id="logout" class="button quiet">退出</button>
@@ -25,7 +32,7 @@
     </aside>
 
     <main class="app-shell">
-      <section id="overview-page" class="page active">
+      <section id="overview-page" class="page">
         <div class="page-heading">
           <div><p class="eyebrow">BACKUP CONTROL</p><h1>归档状态</h1></div>
           <div class="heading-actions">
@@ -102,44 +109,59 @@
         </section>
       </section>
 
-      <section id="remote-files-page" class="page file-page" data-scope="remote">
+      <section id="remote-files-page" class="page file-page active" data-scope="remote">
         <div class="page-heading">
-          <div><p class="eyebrow">GOOGLE DRIVE</p><h1>网盘文件</h1><p class="page-description">仅展示远端已发布 manifest 中的归档对象。</p></div>
+          <div><p class="eyebrow">云端归档</p><h1>Google Drive</h1></div>
+          <div class="file-scope-tabs" aria-label="文件位置">
+            <button class="scope-tab active" data-target-page="remote-files">云端</button>
+            <button class="scope-tab" data-target-page="local-files">本地</button>
+          </div>
         </div>
-        <section class="content-band file-browser">
+        <section class="file-browser">
           <div class="browser-toolbar">
-            <label>采集服务器<select id="remote-profile"></select></label>
-            <div class="browser-actions"><button id="remote-download" class="button primary" disabled>下载此日期</button><button id="remote-refresh" class="button secondary">刷新</button></div>
+            <div class="browser-nav-actions">
+              <button id="remote-up" class="icon-button" aria-label="返回上级" title="返回上级" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+              <button id="remote-refresh" class="icon-button" aria-label="刷新" title="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg></button>
+            </div>
+            <div id="remote-breadcrumbs" class="file-breadcrumbs" aria-label="网盘目录位置"></div>
+            <label class="profile-picker"><span>采集服务器</span><select id="remote-profile"></select></label>
+            <button id="remote-download" class="button primary download-button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg><span>下载该日期</span></button>
           </div>
           <div id="remote-gate" class="browser-gate">选择日期后检查下载资格。</div>
-          <div id="remote-breadcrumbs" class="file-breadcrumbs" aria-label="网盘目录位置"></div>
-          <div id="remote-summary" class="browser-summary">进入页面后读取网盘日期。</div>
           <div class="table-wrap file-table-wrap">
             <table class="file-table">
               <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>状态 / 摘要</th></tr></thead>
               <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器</td></tr></tbody>
             </table>
           </div>
+          <div id="remote-summary" class="browser-summary">正在读取网盘目录</div>
         </section>
       </section>
 
       <section id="local-files-page" class="page file-page" data-scope="local">
         <div class="page-heading">
-          <div><p class="eyebrow">LOCAL ARCHIVE</p><h1>本地文件</h1><p class="page-description">浏览已验证目录与尚未发布的 .partial 暂存文件。</p></div>
-        </div>
-        <section class="content-band file-browser">
-          <div class="browser-toolbar">
-            <label>采集服务器<select id="local-profile"></select></label>
-            <div class="browser-actions"><button id="local-refresh" class="button secondary">刷新</button></div>
+          <div><p class="eyebrow">本机存储</p><h1>本地归档</h1></div>
+          <div class="file-scope-tabs" aria-label="文件位置">
+            <button class="scope-tab" data-target-page="remote-files">云端</button>
+            <button class="scope-tab active" data-target-page="local-files">本地</button>
           </div>
-          <div id="local-breadcrumbs" class="file-breadcrumbs" aria-label="本地目录位置"></div>
-          <div id="local-summary" class="browser-summary">进入页面后读取本地日期。</div>
+        </div>
+        <section class="file-browser">
+          <div class="browser-toolbar">
+            <div class="browser-nav-actions">
+              <button id="local-up" class="icon-button" aria-label="返回上级" title="返回上级" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+              <button id="local-refresh" class="icon-button" aria-label="刷新" title="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg></button>
+            </div>
+            <div id="local-breadcrumbs" class="file-breadcrumbs" aria-label="本地目录位置"></div>
+            <label class="profile-picker"><span>采集服务器</span><select id="local-profile"></select></label>
+          </div>
           <div class="table-wrap file-table-wrap">
             <table class="file-table">
               <thead><tr><th>名称</th><th>位置</th><th>大小</th><th>网盘清单</th><th>修改时间</th></tr></thead>
               <tbody id="local-files-body"><tr><td colspan="5" class="empty-cell">请选择采集服务器</td></tr></tbody>
             </table>
           </div>
+          <div id="local-summary" class="browser-summary">正在读取本地目录</div>
         </section>
       </section>
 
@@ -214,6 +236,18 @@
       </section>
     </main>
   </div>
+  <aside id="transfer-dock" class="transfer-dock" aria-live="polite">
+    <button id="transfer-open" class="transfer-main" aria-label="打开传输任务">
+      <span class="transfer-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span>
+      <span class="transfer-copy"><strong id="transfer-dock-title">传输空闲</strong><small id="transfer-dock-detail">等待自动检查</small></span>
+    </button>
+    <div class="transfer-progress">
+      <div><span id="transfer-dock-state">空闲</span><strong id="transfer-dock-percent">0%</strong></div>
+      <div class="progress-track"><span id="transfer-dock-progress"></span></div>
+    </div>
+    <div class="transfer-stats"><span id="transfer-dock-speed">速度 --</span><span id="transfer-dock-eta">剩余 --</span></div>
+    <button id="transfer-cancel" class="icon-button danger hidden" aria-label="取消当前任务" title="取消当前任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </aside>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

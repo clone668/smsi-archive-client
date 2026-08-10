@@ -78,6 +78,15 @@
     return !!state.runtime?.running || !!state.runtime?.pending || !!activeJob();
   }
 
+  function switchPage(pageName) {
+    $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === pageName));
+    $$(".page").forEach(page => page.classList.toggle("active", page.id === `${pageName}-page`));
+    if (pageName === "jobs") renderJobs();
+    if (pageName === "remote-files") loadFileDates("remote");
+    if (pageName === "local-files") loadFileDates("local");
+    if (pageName === "updates") pollUpdateStatus();
+  }
+
   function renderMetrics() {
     const runtime = state.runtime || {};
     const currentJob = activeJob();
@@ -94,6 +103,11 @@
     const ratio = disk.total ? Math.round(Number(disk.used) / Number(disk.total) * 100) : 0;
     $("#metric-disk").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
     $("#metric-disk-detail").textContent = runtime.disk_error || `可用 ${bytes(disk.free)} / ${bytes(disk.total)}`;
+    $("#sidebar-storage-label").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
+    $("#sidebar-storage-detail").textContent = runtime.disk_error || `${bytes(disk.free)} 可用，共 ${bytes(disk.total)}`;
+    const storageBar = $("#sidebar-storage-bar");
+    storageBar.style.width = `${ratio}%`;
+    storageBar.className = ratio >= 92 ? "bad" : ratio >= 80 ? "warn" : "";
     $("#connection-state").textContent = runtime.running ? "任务执行中" : "客户端在线";
     $("#connection-state").className = "status-dot good";
     $("#cancel-task").classList.toggle("hidden", !activeJob());
@@ -169,6 +183,7 @@
     const progress = state.runtime?.running ? state.runtime?.progress || {} : {};
     renderTaskPanel("overview-job", active, progress);
     renderTaskPanel("jobs", active, progress);
+    renderTransferDock(active, progress);
     $("#jobs-count").textContent = String(state.jobs.length);
     const body = $("#jobs-body");
     if (!state.jobs.length) { body.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无任务</td></tr>'; return; }
@@ -180,6 +195,27 @@
       const detail = job.error || job.detail || "";
       return `<tr><td><div class="job-cell"><strong>${escapeHtml(jobLabel(job))}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></div></td><td>${escapeHtml(location)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${values.objects ? `${values.objectsDone}/${values.objects}` : "--"}</td><td>${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}</td><td>${timeText(job.updated_at)}</td></tr>`;
     }).join("");
+  }
+
+  function renderTransferDock(job = activeJob(), progress = state.runtime?.running ? state.runtime?.progress || {} : {}) {
+    const values = progressValues(job, progress);
+    const live = values.value;
+    const active = !!job && ["queued", "running", "cancelling"].includes(job.status);
+    const [statusLabel] = job
+      ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
+      : ["空闲", ""];
+    $("#transfer-dock").classList.toggle("busy", active);
+    $("#transfer-dock-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "传输空闲";
+    $("#transfer-dock-detail").textContent = job
+      ? (live.current_object || job.archive_date || job.detail || "等待后台任务")
+      : "等待自动检查或手动下载";
+    $("#transfer-dock-state").textContent = statusLabel;
+    $("#transfer-dock-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "0%";
+    $("#transfer-dock-progress").style.width = `${values.percent}%`;
+    $("#transfer-dock-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
+    $("#transfer-dock-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
+    $("#transfer-cancel").classList.toggle("hidden", !active);
+    $("#nav-job-state").textContent = active ? `${statusLabel} ${values.percent.toFixed(0)}%` : "当前空闲";
   }
 
   function renderProfiles() {
@@ -510,6 +546,7 @@
     state.fileBrowsers[scope].dates = [];
     state.fileBrowsers[scope].index = null;
     state.fileBrowsers[scope].meta = null;
+    $(`#${scope}-up`).disabled = true;
     $(`#${scope}-summary`).textContent = message;
     if (scope === "remote") {
       $("#remote-download").disabled = true;
@@ -540,6 +577,10 @@
     const previousDate = force ? browserState.date : "";
     const previousPath = force ? browserState.path : "";
     const request = ++state.fileBrowsers[scope].request;
+    const refreshButton = $(`#${scope}-refresh`);
+    refreshButton.classList.add("loading");
+    refreshButton.disabled = true;
+    refreshButton.setAttribute("aria-busy", "true");
     browserState.loadedProfile = "";
     browserState.path = "";
     browserState.index = null;
@@ -562,6 +603,12 @@
     } catch (error) {
       if (request !== state.fileBrowsers[scope].request) return;
       clearFileBrowser(scope, error.message);
+    } finally {
+      if (request === state.fileBrowsers[scope].request) {
+        refreshButton.classList.remove("loading");
+        refreshButton.disabled = false;
+        refreshButton.removeAttribute("aria-busy");
+      }
     }
   }
 
@@ -645,6 +692,17 @@
     $$(".date-link", body).forEach(button => button.addEventListener("click", () => selectFileDate(scope, button.dataset.date || "")));
   }
 
+  function navigateUp(scope) {
+    const browserState = state.fileBrowsers[scope];
+    if (!browserState.date) return;
+    if (!browserState.path) {
+      renderDateList(scope, browserState.dates);
+      return;
+    }
+    const parent = browserState.path.split("/").slice(0, -1).join("/");
+    renderCachedIndex(scope, parent);
+  }
+
   function selectFileDate(scope, archiveDate) {
     state.fileBrowsers[scope].date = archiveDate;
     state.fileBrowsers[scope].path = "";
@@ -662,8 +720,11 @@
       const [first, ...rest] = remainder.split("/");
       const childPath = path ? `${path}/${first}` : first;
       if (rest.length) {
-        const entry = entries[childPath] || { type: "directory", path: childPath, name: first, entry_count: 0 };
+        const entry = entries[childPath] || { type: "directory", path: childPath, name: first, entry_count: 0, locations: [] };
         entry.entry_count += 1;
+        for (const location of item.locations || [item.location]) {
+          if (location && !entry.locations.includes(location)) entry.locations.push(location);
+        }
         entries[childPath] = entry;
       } else {
         entries[childPath] = { ...item, path: childPath, name: first };
@@ -752,6 +813,8 @@
 
   function renderFileBreadcrumbs(scope, path, parentPath, archiveDate) {
     const root = $(`#${scope}-breadcrumbs`);
+    const up = $(`#${scope}-up`);
+    up.disabled = !archiveDate;
     const parts = path ? path.split("/") : [];
     const crumbs = [`<button class="breadcrumb root-breadcrumb" data-path="">${icon("home")}<span>归档根目录</span></button>`];
     if (archiveDate) crumbs.push(`<span class="breadcrumb-separator">/</span><button class="breadcrumb date-breadcrumb" data-date="${escapeHtml(archiveDate)}">${escapeHtml(archiveDate)}</button>`);
@@ -761,9 +824,7 @@
       crumbs.push(`<span class="breadcrumb-separator">/</span><button class="breadcrumb" data-path="${escapeHtml(current)}">${escapeHtml(part)}</button>`);
     });
     root.innerHTML = crumbs.join("");
-    $$(".root-breadcrumb", root).forEach(button => button.addEventListener("click", () => {
-      if (archiveDate) renderDateList(scope, state.fileBrowsers[scope].dates);
-    }));
+    $$(".root-breadcrumb", root).forEach(button => button.addEventListener("click", () => renderDateList(scope, state.fileBrowsers[scope].dates)));
     $$(".date-breadcrumb", root).forEach(button => button.addEventListener("click", () => loadFileList(scope, "")));
     $$(".breadcrumb[data-path]", root).filter(button => !button.classList.contains("root-breadcrumb")).forEach(button => {
       button.addEventListener("click", () => loadFileList(scope, button.dataset.path || ""));
@@ -900,18 +961,13 @@
     const result = await api("/api/bootstrap");
     state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events;
     renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
+    await loadFileDates("remote");
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);
   }
 
-  $$(".nav-item").forEach(button => button.addEventListener("click", () => {
-    $$(".nav-item").forEach(item => item.classList.toggle("active", item === button));
-    $$(".page").forEach(page => page.classList.toggle("active", page.id === `${button.dataset.page}-page`));
-    if (button.dataset.page === "jobs") renderJobs();
-    if (button.dataset.page === "remote-files") loadFileDates("remote");
-    if (button.dataset.page === "local-files") loadFileDates("local");
-    if (button.dataset.page === "updates") pollUpdateStatus();
-  }));
+  $$(".nav-item").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.page)));
+  $$(".scope-tab").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.targetPage)));
   for (const scope of ["remote", "local"]) {
     $(`#${scope}-profile`).addEventListener("change", () => {
       state.fileBrowsers[scope].loadedProfile = "";
@@ -919,6 +975,7 @@
       loadFileDates(scope);
     });
     $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope, true));
+    $(`#${scope}-up`).addEventListener("click", () => navigateUp(scope));
   }
   $("#scan-only").addEventListener("click", () => runScan(false));
   $("#scan-download").addEventListener("click", () => runScan(true));
@@ -931,6 +988,8 @@
   };
   $("#cancel-task").addEventListener("click", cancelTask);
   $("#jobs-cancel-task").addEventListener("click", cancelTask);
+  $("#transfer-cancel").addEventListener("click", cancelTask);
+  $("#transfer-open").addEventListener("click", () => switchPage("jobs"));
   $("#remote-download").addEventListener("click", downloadDate);
   $("#check-update").addEventListener("click", checkUpdate);
   $("#download-update").addEventListener("click", downloadUpdate);
