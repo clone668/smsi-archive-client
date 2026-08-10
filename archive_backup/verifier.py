@@ -8,7 +8,11 @@ from pathlib import Path, PurePosixPath
 from threading import Event
 from typing import Any, Callable, Mapping
 
-from .protocol import ManifestSnapshot, validate_relative_key
+from .protocol import (
+    RUNTIME_REPORT_CONTRACT,
+    ManifestSnapshot,
+    validate_relative_key,
+)
 
 
 VerifyProgress = Callable[[str, int, int], None]
@@ -100,6 +104,54 @@ def verify_parquet(path: Path, item: Mapping[str, Any], cancel: Event | None = N
     return {"row_count": row_count, "schema_sha256": schema_sha256, "content_sha256": content_sha256}
 
 
+def verify_runtime_report(
+    path: Path,
+    item: Mapping[str, Any],
+    archive_date: str,
+) -> dict[str, Any]:
+    if path.stat().st_size > 4 * 1024 * 1024:
+        raise RuntimeError(f"运行报告超过安全大小: {path.name}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"运行报告格式无效: {path.name}") from exc
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"运行报告格式无效: {path.name}")
+    if (
+        payload.get("contract_version") != RUNTIME_REPORT_CONTRACT
+        or item.get("report_contract_version") != RUNTIME_REPORT_CONTRACT
+        or str(payload.get("archive_date") or "") != archive_date
+    ):
+        raise RuntimeError(f"运行报告协议或日期不匹配: {path.name}")
+    collector_node_id = str(payload.get("collector_node_id") or "").strip()
+    if not collector_node_id:
+        raise RuntimeError(f"运行报告缺少采集节点标识: {path.name}")
+    overall_status = str(payload.get("overall_status") or "")
+    if overall_status not in {"healthy", "attention", "critical", "unknown"}:
+        raise RuntimeError(f"运行报告健康状态无效: {path.name}")
+    archive = payload.get("archive")
+    collection = payload.get("collection_sources")
+    if (
+        not isinstance(archive, Mapping)
+        or archive.get("status") != "data_objects_verified"
+        or archive.get("all_data_objects_read_verified") is not True
+        or not isinstance(collection, Mapping)
+        or not isinstance(collection.get("sources"), list)
+    ):
+        raise RuntimeError(f"运行报告归档或采集证据不完整: {path.name}")
+    if int(item.get("row_count") or 0) != 1:
+        raise RuntimeError(f"运行报告记录数无效: {path.name}")
+    return {
+        "row_count": 1,
+        "report_contract_version": RUNTIME_REPORT_CONTRACT,
+        "collector_node_id": collector_node_id,
+        "overall_status": overall_status,
+        "quality_policy_sha256": str(
+            (collection.get("quality_policy") or {}).get("sha256") or ""
+        ),
+    }
+
+
 def local_object_path(day_root: Path, relative_key: str, archive_date: str) -> Path:
     safe = validate_relative_key(relative_key, archive_date)
     path = PurePosixPath(safe)
@@ -133,22 +185,26 @@ def verify_local_day(
             raise RuntimeError(f"本地归档对象大小不一致: {key}")
         if sha256_file(path, cancel) != expected_sha:
             raise RuntimeError(f"本地归档对象 SHA-256 不一致: {key}")
-        parquet = verify_parquet(path, item, cancel)
-        total_rows += int(parquet["row_count"])
+        verification = (
+            verify_runtime_report(path, item, snapshot.archive_date)
+            if item.get("kind") == "runtime_report"
+            else verify_parquet(path, item, cancel)
+        )
+        total_rows += int(verification["row_count"])
         entry = {
             "relative_key": key,
             "kind": item.get("kind"),
             "table_name": item.get("table_name"),
             "size_bytes": expected_size,
             "sha256": expected_sha,
-            **parquet,
+            **verification,
         }
         verified.append(entry)
         tree_material.append({
             "relative_key": key,
             "size_bytes": expected_size,
             "sha256": expected_sha,
-            "row_count": parquet["row_count"],
+            "row_count": verification["row_count"],
         })
         if progress:
             progress(key, index, snapshot.object_count)

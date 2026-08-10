@@ -63,6 +63,18 @@ class StateDatabase:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS archive_comparisons (
+                    archive_date TEXT NOT NULL,
+                    pair_id TEXT NOT NULL,
+                    left_profile_id TEXT NOT NULL,
+                    right_profile_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    compared_at TEXT NOT NULL,
+                    PRIMARY KEY (archive_date, pair_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_archive_comparisons_date
+                    ON archive_comparisons(archive_date DESC, pair_id);
                 """
             )
 
@@ -145,6 +157,52 @@ class StateDatabase:
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (bounded,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def replace_comparisons(self, values: list[dict[str, Any]]) -> None:
+        now = utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM archive_comparisons")
+            connection.executemany(
+                """
+                INSERT INTO archive_comparisons(
+                    archive_date, pair_id, left_profile_id, right_profile_id,
+                    status, detail_json, compared_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        str(item.get("archive_date") or "")[:10],
+                        str(item.get("pair_id") or "")[:140],
+                        str(item.get("left_profile_id") or "")[:64],
+                        str(item.get("right_profile_id") or "")[:64],
+                        str(item.get("status") or "unknown")[:16],
+                        json.dumps(item, ensure_ascii=False, sort_keys=True),
+                        now,
+                    )
+                    for item in values
+                ],
+            )
+
+    def comparisons(self, limit: int = 180) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 1000))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM archive_comparisons "
+                "ORDER BY archive_date DESC, pair_id LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            value = dict(row)
+            try:
+                detail = json.loads(str(value.pop("detail_json")))
+            except json.JSONDecodeError:
+                detail = {}
+            if not isinstance(detail, dict):
+                detail = {}
+            detail.update(value)
+            results.append(detail)
+        return results
 
     def set_runtime(self, key: str, value: Any) -> None:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)

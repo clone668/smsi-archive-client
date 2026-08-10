@@ -138,6 +138,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "runtime": service.status(),
             "updates": updater.status(),
             "days": database.days(1000),
+            "comparisons": database.comparisons(180),
             "events": database.events(100),
             "initial_password_pending": config_store.initial_password_path.exists(),
         })
@@ -149,6 +150,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "runtime": service.status(),
             "updates": updater.status(),
             "days": database.days(1000),
+            "comparisons": database.comparisons(180),
             "events": database.events(100),
         })
 

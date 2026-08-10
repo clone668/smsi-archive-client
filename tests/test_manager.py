@@ -154,7 +154,12 @@ class ChangedAfterDownloadSource:
         return None
 
     def download(self, relative_key: str, destination: Path, cancel=None, progress=None, bandwidth_limit=None) -> int:
-        shutil.copyfile(self.fixture["object_path"], destination)
+        source = (
+            self.fixture["report_path"]
+            if relative_key.endswith("runtime-report.json")
+            else self.fixture["object_path"]
+        )
+        shutil.copyfile(source, destination)
         if progress:
             progress(destination.stat().st_size)
         return destination.stat().st_size
@@ -223,7 +228,12 @@ class CancelDuringDownloadSource:
         return None
 
     def download(self, relative_key, destination, cancel=None, progress=None, bandwidth_limit=None):
-        shutil.copyfile(self.fixture["object_path"], destination)
+        source = (
+            self.fixture["report_path"]
+            if relative_key.endswith("runtime-report.json")
+            else self.fixture["object_path"]
+        )
+        shutil.copyfile(source, destination)
         if progress:
             progress(destination.stat().st_size)
         self.cancel.set()
@@ -260,10 +270,11 @@ def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -
 
     assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
     assert result["state"] == "ready"
-    assert result["entry_count"] == 1
+    assert result["entry_count"] == 2
     assert result["entries"][0]["type"] == "directory"
-    assert len(result["browse_index"]) == 1
+    assert len(result["browse_index"]) == 2
     assert result["browse_index"][0]["path"] == "business/table=price_data/day/part-00000.parquet"
+    assert result["browse_index"][1]["path"] == "runtime-report.json"
     nested = manager.browse_files(
         profile.profile_id,
         fixture["archive_date"],

@@ -42,15 +42,58 @@ def archive_fixture(tmp_path: Path):
             "schema_sha256": schema_sha,
             "content_sha256": content.hexdigest(),
         }
+        report_path = day_root / "runtime-report.json"
+        report = {
+            "contract_version": "smsi-runtime-health-report/v1",
+            "archive_date": archive_date,
+            "collector_node_id": "collector-a",
+            "overall_status": "healthy",
+            "summary": {"top_issues": []},
+            "archive": {
+                "status": "data_objects_verified",
+                "all_data_objects_read_verified": True,
+            },
+            "collection_sources": {
+                "quality_policy": {"sha256": "1" * 64},
+                "sources": [
+                    {
+                        "source_id": "binance_market_events",
+                        "quality": {"status": "healthy"},
+                    }
+                ],
+            },
+            "database": {"writes": {"record_count": len(rows)}},
+            "warning_error_logs": {"record_count": 0},
+        }
+        report_raw = json.dumps(
+            report, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        report_path.write_bytes(report_raw)
+        report_key = f"date={archive_date}/runtime-report.json"
+        report_item = {
+            "kind": "runtime_report",
+            "table_name": "runtime_health",
+            "format": "json",
+            "relative_key": report_key,
+            "row_count": 1,
+            "size_bytes": len(report_raw),
+            "sha256": hashlib.sha256(report_raw).hexdigest(),
+            "report_contract_version": "smsi-runtime-health-report/v1",
+        }
         manifest = {
             "contract_version": "smsi-long-term-archive-manifest/v3",
             "status": "verified",
             "archive_date": archive_date,
-            "object_count": 1,
-            "row_count": len(rows),
+            "object_count": 2,
+            "row_count": len(rows) + 1,
             "retention_delete_allowed": True,
-            "objects": [item],
-            "replicas": {"google_drive": [{"relative_key": relative_key, "read_verified": True}]},
+            "objects": [item, report_item],
+            "replicas": {
+                "google_drive": [
+                    {"relative_key": relative_key, "read_verified": True},
+                    {"relative_key": report_key, "read_verified": True},
+                ]
+            },
         }
         manifest_raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
         (day_root / "manifest.json").write_bytes(manifest_raw)
@@ -71,6 +114,7 @@ def archive_fixture(tmp_path: Path):
             "source_root": source_root,
             "day_root": day_root,
             "object_path": object_path,
+            "report_path": report_path,
             "manifest": manifest,
             "manifest_raw": manifest_raw,
             "relative_key": relative_key,

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const state = {
-    csrf: "", config: null, runtime: null, updates: null, days: [], events: [],
+    csrf: "", config: null, runtime: null, updates: null, days: [], comparisons: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
       remote: { request: 0, path: "", date: "", dates: [], index: null, meta: null },
@@ -33,7 +33,7 @@
     return Number.isNaN(parsed.valueOf()) ? String(value) : parsed.toLocaleString("zh-CN", { hour12: false });
   };
   const statusMap = {
-    verified: ["已验证", "good"], downloading: ["下载中", "warn"], verifying: ["校验中", "warn"],
+    verified: ["恢复验证通过", "good"], downloading: ["下载中", "warn"], verifying: ["校验中", "warn"],
     ready: ["可下载", "warn"], remote_running: ["远端归档中", "warn"], waiting_manifest: ["等待发布", "warn"],
     remote_failed: ["远端失败", "bad"], error: ["处理失败", "bad"], manifest_changed: ["清单已变化", "bad"],
     cancelled: ["已取消", "warn"],
@@ -133,6 +133,36 @@
     $$(".day-detail-toggle", body).forEach(button => button.addEventListener("click", () => toggleDayDetail(button)));
   }
 
+  function renderComparisons() {
+    const body = $("#comparisons-body");
+    const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
+    const status = {
+      healthy: ["一致", "good"], attention: ["需关注", "warn"],
+      critical: ["严重", "bad"], unknown: ["证据不足", ""],
+    };
+    $("#comparison-summary").textContent = state.comparisons.length
+      ? `${state.comparisons.length} 个日期对比结果；只使用已完成恢复验证的数据`
+      : "仅比较两侧均已完成恢复验证的日期";
+    if (!state.comparisons.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty-cell">两台服务器完成同一日期的下载与恢复验证后自动生成</td></tr>';
+      return;
+    }
+    body.innerHTML = state.comparisons.map(item => {
+      const [label, tone] = status[item.status] || [item.status || "未知", ""];
+      const left = profiles[item.left_profile_id] || item.left_profile_id;
+      const right = profiles[item.right_profile_id] || item.right_profile_id;
+      const records = item.record_count || {};
+      const difference = Number(item.record_relative_difference || 0);
+      const issues = (item.issues || []).slice(0, 2).map(issue => issue.detail || issue.code).filter(Boolean);
+      const issueText = issues.length
+        ? issues.join("；")
+        : "质量策略、来源状态与业务表清单一致";
+      const restore = item.restore_verification || {};
+      const restorePassed = restore.left === "verified" && restore.right === "verified";
+      return `<tr><td>${escapeHtml(item.archive_date)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${escapeHtml(left)} / ${escapeHtml(right)}</td><td><span class="state-pill ${restorePassed ? "good" : ""}">${restorePassed ? "两侧通过" : "证据不足"}</span></td><td>${Number(records.left || 0).toLocaleString("zh-CN")} / ${Number(records.right || 0).toLocaleString("zh-CN")}</td><td title="${escapeHtml((item.issues || []).map(issue => issue.detail || issue.code).join("；"))}">${difference ? `差异 ${(difference * 100).toFixed(1)}% · ` : ""}${escapeHtml(issueText)}</td></tr>`;
+    }).join("");
+  }
+
   function durationText(seconds) {
     const value = Math.max(0, Math.round(Number(seconds) || 0));
     if (value < 60) return `${value} 秒`;
@@ -169,7 +199,7 @@
     root.innerHTML = state.events.map(item => `<article class="event-item ${escapeHtml(item.level)}"><header><strong>${escapeHtml(item.event)}</strong><time>${timeText(item.created_at)}</time></header><p>${escapeHtml([item.profile_id, item.archive_date, item.detail].filter(Boolean).join(" · ") || "--")}</p></article>`).join("");
   }
 
-  function renderAll() { renderMetrics(); renderProfiles(); renderDays(); renderEvents(); }
+  function renderAll() { renderMetrics(); renderProfiles(); renderComparisons(); renderDays(); renderEvents(); }
 
   function renderUpdates() {
     const updates = state.updates || {};
@@ -676,7 +706,7 @@
   async function refresh() {
     try {
       const result = await api("/api/status");
-      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.events = result.events; renderAll(); renderUpdates();
+      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.comparisons = result.comparisons || []; state.events = result.events; renderAll(); renderUpdates();
     } catch (error) {
       $("#connection-state").textContent = "连接中断"; $("#connection-state").className = "status-dot bad";
     }
@@ -684,7 +714,7 @@
 
   async function bootstrap() {
     const result = await api("/api/bootstrap");
-    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.events = result.events;
+    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.comparisons = result.comparisons || []; state.events = result.events;
     renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);

@@ -11,6 +11,7 @@ from typing import Any, Mapping
 DATE_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MANIFEST_CONTRACT = "smsi-long-term-archive-manifest/v3"
+RUNTIME_REPORT_CONTRACT = "smsi-runtime-health-report/v1"
 PROGRESS_CONTRACT = "smsi-archive-progress/v1"
 PROGRESS_STAGES = {
     "preparing",
@@ -124,6 +125,7 @@ def parse_manifest(raw: bytes, archive_date: str) -> ManifestSnapshot:
         raise RuntimeError("manifest 对象总数不一致")
     keys: set[str] = set()
     rows = 0
+    runtime_report_count = 0
     for item in objects:
         if not isinstance(item, dict):
             raise RuntimeError("manifest 对象记录无效")
@@ -135,9 +137,20 @@ def parse_manifest(raw: bytes, archive_date: str) -> ManifestSnapshot:
             raise RuntimeError(f"manifest 对象大小无效: {key}")
         if not SHA_RE.fullmatch(str(item.get("sha256") or "")):
             raise RuntimeError(f"manifest 对象摘要无效: {key}")
-        if not SHA_RE.fullmatch(str(item.get("schema_sha256") or "")):
+        kind = str(item.get("kind") or "")
+        item_format = str(item.get("format") or "parquet")
+        if kind == "runtime_report":
+            runtime_report_count += 1
+            if (
+                runtime_report_count > 1
+                or item_format != "json"
+                or PurePosixPath(key).name != "runtime-report.json"
+                or item.get("report_contract_version") != RUNTIME_REPORT_CONTRACT
+            ):
+                raise RuntimeError(f"manifest 运行报告对象无效: {key}")
+        elif not SHA_RE.fullmatch(str(item.get("schema_sha256") or "")):
             raise RuntimeError(f"manifest schema 摘要无效: {key}")
-        if item.get("kind") == "business" and not SHA_RE.fullmatch(
+        if kind == "business" and not SHA_RE.fullmatch(
             str(item.get("content_sha256") or "")
         ):
             raise RuntimeError(f"manifest 业务内容摘要无效: {key}")

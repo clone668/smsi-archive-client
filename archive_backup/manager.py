@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from .config import ClientConfig, ProfileConfig
+from .comparison import build_archive_comparisons
 from .database import StateDatabase
 from .protocol import DATE_RE, ManifestSnapshot, parse_manifest, parse_progress
 from .sources import ArchiveSource, build_source, split_bandwidth_limit
@@ -248,7 +249,7 @@ class ArchiveManager:
                 row_count=snapshot.row_count,
                 bytes_total=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
-                detail="本地已完整验证",
+                detail="本地恢复验证已通过",
                 error="",
             )
             return existing
@@ -398,7 +399,7 @@ class ArchiveManager:
             status="verifying",
             objects_done=snapshot.object_count,
             bytes_done=bytes_total,
-            detail="正在校验 Parquet schema、行数与业务内容摘要",
+            detail="正在执行恢复验证：SHA-256、Parquet/JSON、schema、行数与业务摘要",
         )
 
         def verification_progress(_key: str, current: int, total: int) -> None:
@@ -457,11 +458,11 @@ class ArchiveManager:
             status="verified",
             objects_done=snapshot.object_count,
             bytes_done=bytes_total,
-            detail="下载与完整校验完成",
+            detail="下载完成，恢复验证通过",
             error="",
         )
         self.database.event(
-            "info", "归档下载验证完成", profile_id=profile.profile_id,
+            "info", "归档下载与恢复验证完成", profile_id=profile.profile_id,
             archive_date=archive_date,
             detail=f"{snapshot.object_count} 个对象，{snapshot.row_count} 行",
         )
@@ -961,7 +962,13 @@ class ArchiveManager:
                         "error", "归档来源检查失败",
                         profile_id=profile.profile_id, detail=str(exc),
                     )
+        self.refresh_comparisons()
         return results
+
+    def refresh_comparisons(self) -> list[dict[str, Any]]:
+        comparisons = build_archive_comparisons(self.config, self.database.days(5000))
+        self.database.replace_comparisons(comparisons)
+        return comparisons
 
     def verify_existing(self, profile_id: str, archive_date: str) -> dict[str, Any]:
         profile = next((item for item in self.config.profiles if item.profile_id == profile_id), None)
@@ -1021,6 +1028,7 @@ class ArchiveManager:
             "downloaded_bytes_this_run": 0,
         })
         write_json_atomic(root / ".smsi-verified.json", report)
-        self.database.upsert_day(profile_id, archive_date, status="verified", detail="重新完整校验通过", error="")
-        self.database.event("info", "本地归档重新验证完成", profile_id=profile_id, archive_date=archive_date)
+        self.database.upsert_day(profile_id, archive_date, status="verified", detail="重新恢复验证通过", error="")
+        self.database.event("info", "本地归档重新恢复验证完成", profile_id=profile_id, archive_date=archive_date)
+        self.refresh_comparisons()
         return report
