@@ -110,8 +110,8 @@
       </section>
 
       <section id="remote-files-page" class="page file-page active" data-scope="remote">
-        <div class="page-heading">
-          <div><p class="eyebrow">云端归档</p><h1>Google Drive</h1></div>
+        <div class="page-heading file-page-heading">
+          <div><p class="eyebrow">云端归档</p><h1>Google Drive</h1><p id="remote-location-summary" class="page-description">正在连接采集服务器</p></div>
           <div class="file-scope-tabs" aria-label="文件位置">
             <button class="scope-tab active" data-target-page="remote-files">云端</button>
             <button class="scope-tab" data-target-page="local-files">本地</button>
@@ -124,44 +124,70 @@
               <button id="remote-refresh" class="icon-button" aria-label="刷新" title="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg></button>
             </div>
             <div id="remote-breadcrumbs" class="file-breadcrumbs" aria-label="网盘目录位置"></div>
+            <label class="browser-search" aria-label="搜索当前目录"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="remote-search" type="search" placeholder="搜索当前目录"></label>
             <label class="profile-picker"><span>采集服务器</span><select id="remote-profile"></select></label>
             <button id="remote-download" class="button primary download-button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg><span>下载该日期</span></button>
           </div>
           <div id="remote-gate" class="browser-gate">选择日期后检查下载资格。</div>
-          <div class="table-wrap file-table-wrap">
-            <table class="file-table">
-              <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>状态 / 摘要</th></tr></thead>
-              <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器</td></tr></tbody>
-            </table>
+          <div class="explorer-body">
+            <aside class="directory-pane" aria-label="网盘目录树">
+              <div class="pane-heading"><span>目录</span><strong id="remote-tree-count">--</strong></div>
+              <div id="remote-tree" class="directory-tree"><p class="tree-empty">正在读取目录</p></div>
+            </aside>
+            <section class="file-list-pane" aria-label="网盘文件列表">
+              <div class="table-wrap file-table-wrap">
+                <table class="file-table">
+                  <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>摘要</th></tr></thead>
+                  <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器</td></tr></tbody>
+                </table>
+              </div>
+              <div id="remote-summary" class="browser-summary">正在读取网盘目录</div>
+            </section>
+            <aside class="inspector-pane" aria-label="网盘对象详情">
+              <div class="pane-heading"><span>详细信息</span></div>
+              <div id="remote-inspector" class="inspector-content"></div>
+            </aside>
           </div>
-          <div id="remote-summary" class="browser-summary">正在读取网盘目录</div>
         </section>
       </section>
 
       <section id="local-files-page" class="page file-page" data-scope="local">
-        <div class="page-heading">
-          <div><p class="eyebrow">本机存储</p><h1>本地归档</h1></div>
+        <div class="page-heading file-page-heading">
+          <div><p class="eyebrow">本机存储</p><h1>本地归档</h1><p id="local-location-summary" class="page-description">正在读取本地副本</p></div>
           <div class="file-scope-tabs" aria-label="文件位置">
             <button class="scope-tab" data-target-page="remote-files">云端</button>
             <button class="scope-tab active" data-target-page="local-files">本地</button>
           </div>
         </div>
         <section class="file-browser">
-          <div class="browser-toolbar">
+          <div class="browser-toolbar local-toolbar">
             <div class="browser-nav-actions">
               <button id="local-up" class="icon-button" aria-label="返回上级" title="返回上级" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
               <button id="local-refresh" class="icon-button" aria-label="刷新" title="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg></button>
             </div>
             <div id="local-breadcrumbs" class="file-breadcrumbs" aria-label="本地目录位置"></div>
+            <label class="browser-search" aria-label="搜索当前目录"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="local-search" type="search" placeholder="搜索当前目录"></label>
             <label class="profile-picker"><span>采集服务器</span><select id="local-profile"></select></label>
           </div>
-          <div class="table-wrap file-table-wrap">
-            <table class="file-table">
-              <thead><tr><th>名称</th><th>位置</th><th>大小</th><th>网盘清单</th><th>修改时间</th></tr></thead>
-              <tbody id="local-files-body"><tr><td colspan="5" class="empty-cell">请选择采集服务器</td></tr></tbody>
-            </table>
+          <div class="explorer-body local-explorer-body">
+            <aside class="directory-pane" aria-label="本地目录树">
+              <div class="pane-heading"><span>目录</span><strong id="local-tree-count">--</strong></div>
+              <div id="local-tree" class="directory-tree"><p class="tree-empty">正在读取目录</p></div>
+            </aside>
+            <section class="file-list-pane" aria-label="本地文件列表">
+              <div class="table-wrap file-table-wrap">
+                <table class="file-table local-file-table">
+                  <thead><tr><th>名称</th><th>位置</th><th>大小</th><th>网盘清单</th><th>修改时间</th></tr></thead>
+                  <tbody id="local-files-body"><tr><td colspan="5" class="empty-cell">请选择采集服务器</td></tr></tbody>
+                </table>
+              </div>
+              <div id="local-summary" class="browser-summary">正在读取本地目录</div>
+            </section>
+            <aside class="inspector-pane" aria-label="本地对象详情">
+              <div class="pane-heading"><span>详细信息</span></div>
+              <div id="local-inspector" class="inspector-content"></div>
+            </aside>
           </div>
-          <div id="local-summary" class="browser-summary">正在读取本地目录</div>
         </section>
       </section>
 

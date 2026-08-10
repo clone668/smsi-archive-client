@@ -5,6 +5,27 @@ from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.web import create_app
 
 
+def test_file_manager_is_the_default_workspace(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    try:
+        password = store.initial_password_path.read_text(encoding="utf-8").strip()
+        assert client.post("/login", data={"password": password}).status_code == 302
+        page = client.get("/").get_data(as_text=True)
+
+        assert 'id="remote-files-page" class="page file-page active"' in page
+        assert 'id="remote-tree"' in page
+        assert 'id="remote-search"' in page
+        assert 'id="remote-files-body"' in page
+        assert 'id="remote-inspector"' in page
+        assert 'id="transfer-dock"' in page
+    finally:
+        app.extensions["smsi_archive_service"].stop()
+
+
 def test_login_and_csrf_protection(tmp_path) -> None:
     store = ConfigStore(tmp_path / "state")
     store.load()

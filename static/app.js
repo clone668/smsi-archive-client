@@ -4,8 +4,8 @@
     csrf: "", config: null, runtime: null, updates: null, days: [], jobs: [], comparisons: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
-      remote: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null },
-      local: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null },
+      remote: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
+      local: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
     },
   };
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -15,11 +15,25 @@
     const paths = {
       folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><path d="M3 9h18"/>',
       file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h6"/>',
+      database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+      report: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 17v-3M12 17v-6M16 17v-4"/>',
+      control: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9 15 2 2 4-5"/>',
+      calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>',
       chevron: '<path d="m9 18 6-6-6-6"/>',
       home: '<path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9M9 20v-6h6v6"/>',
     };
     return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
   };
+
+  function entryVisual(item = {}) {
+    if (item.type === "directory") return { iconName: "folder", className: "folder", label: "文件夹" };
+    const name = String(item.name || "").toLowerCase();
+    const kind = String(item.kind || "").toLowerCase();
+    if (kind === "runtime_report" || name.includes("report")) return { iconName: "report", className: "report", label: "运行报告" };
+    if ((kind && !["control", "evidence"].includes(kind)) || name.endsWith(".parquet")) return { iconName: "database", className: "file", label: "归档数据" };
+    if (name.endsWith(".json") || name.endsWith(".sha256")) return { iconName: "control", className: "control", label: "控制文件" };
+    return { iconName: "file", className: "file", label: "文件" };
+  }
   const bytes = value => {
     let n = Number(value || 0);
     const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -546,7 +560,15 @@
     state.fileBrowsers[scope].dates = [];
     state.fileBrowsers[scope].index = null;
     state.fileBrowsers[scope].meta = null;
+    state.fileBrowsers[scope].currentResult = null;
+    state.fileBrowsers[scope].query = "";
     $(`#${scope}-up`).disabled = true;
+    $(`#${scope}-search`).value = "";
+    $(`#${scope}-search`).disabled = true;
+    $(`#${scope}-tree-count`).textContent = "--";
+    $(`#${scope}-tree`).innerHTML = `<p class="tree-empty">${escapeHtml(message)}</p>`;
+    $(`#${scope}-inspector`).innerHTML = '<p class="inspector-empty">当前没有可显示的对象。</p>';
+    $(`#${scope}-location-summary`).textContent = message;
     $(`#${scope}-summary`).textContent = message;
     if (scope === "remote") {
       $("#remote-download").disabled = true;
@@ -661,13 +683,20 @@
     const browserState = state.fileBrowsers[scope];
     browserState.date = "";
     browserState.path = "";
+    browserState.currentResult = null;
+    browserState.query = "";
+    $(`#${scope}-search`).value = "";
+    $(`#${scope}-search`).disabled = true;
     if (scope === "remote") {
       $("#remote-download").disabled = true;
       $("#remote-gate").textContent = "选择日期后检查下载资格。";
       $("#remote-gate").className = "browser-gate";
     }
     renderFileBreadcrumbs(scope, "", "", "");
-    $(`#${scope}-summary`).innerHTML = `<span><strong>归档根目录</strong></span><span>${dates.length} 个日期</span><span>点击日期文件夹进入</span>`;
+    $(`#${scope}-summary`).innerHTML = `<span><strong>归档根目录</strong></span><span>${dates.length} 个日期</span><span>按日期组织</span>`;
+    renderDirectoryTree(scope);
+    renderInspector(scope);
+    renderLocationSummary(scope);
     const body = $(`#${scope}-files-body`);
     const columns = scope === "remote" ? 6 : 5;
     if (!dates.length) {
@@ -690,6 +719,67 @@
       }).join("");
     }
     $$(".date-link", body).forEach(button => button.addEventListener("click", () => selectFileDate(scope, button.dataset.date || "")));
+  }
+
+  function renderLocationSummary(scope) {
+    const browserState = state.fileBrowsers[scope];
+    const profileId = $(`#${scope}-profile`).value;
+    const profile = (state.config?.profiles || []).find(item => item.profile_id === profileId);
+    const location = browserState.date
+      ? [browserState.date, browserState.path].filter(Boolean).join(" / ")
+      : `${browserState.dates.length} 个归档日期`;
+    $(`#${scope}-location-summary`).textContent = `${profile?.display_name || profileId || "未配置采集服务器"} · ${location}`;
+  }
+
+  function renderDirectoryTree(scope) {
+    const browserState = state.fileBrowsers[scope];
+    const root = $(`#${scope}-tree`);
+    if (!browserState.date) {
+      $(`#${scope}-tree-count`).textContent = String(browserState.dates.length);
+      root.innerHTML = `<button class="tree-item root active" data-tree-root="true" style="--tree-depth:0">${icon("home")}<span>全部归档</span></button>${browserState.dates.map(item => `<button class="tree-item" data-tree-date="${escapeHtml(item.archive_date)}" style="--tree-depth:1">${icon("calendar")}<span>${escapeHtml(item.archive_date)}</span></button>`).join("")}`;
+    } else {
+      const paths = new Set();
+      for (const item of browserState.index || []) {
+        const parts = String(item.path || "").split("/").filter(Boolean);
+        parts.slice(0, -1).forEach((_part, index) => paths.add(parts.slice(0, index + 1).join("/")));
+      }
+      const directories = [...paths].sort((left, right) => left.localeCompare(right));
+      $(`#${scope}-tree-count`).textContent = String(directories.length + 1);
+      root.innerHTML = `<button class="tree-item root" data-tree-root="true" style="--tree-depth:0">${icon("home")}<span>全部归档</span></button><button class="tree-item ${browserState.path ? "" : "active"}" data-tree-path="" style="--tree-depth:1">${icon("calendar")}<span>${escapeHtml(browserState.date)}</span></button>${directories.map(path => { const parts = path.split("/"); const active = browserState.path === path ? "active" : ""; return `<button class="tree-item ${active}" data-tree-path="${escapeHtml(path)}" style="--tree-depth:${Math.min(parts.length + 1, 8)}">${icon("folder")}<span title="${escapeHtml(path)}">${escapeHtml(parts.at(-1))}</span></button>`; }).join("")}`;
+    }
+    $$("[data-tree-root]", root).forEach(button => button.addEventListener("click", () => renderDateList(scope, browserState.dates)));
+    $$("[data-tree-date]", root).forEach(button => button.addEventListener("click", () => selectFileDate(scope, button.dataset.treeDate || "")));
+    $$("[data-tree-path]", root).forEach(button => button.addEventListener("click", () => renderCachedIndex(scope, button.dataset.treePath || "")));
+  }
+
+  function inspectorFields(fields) {
+    return `<dl class="inspector-fields">${fields.filter(item => item[1] !== "" && item[1] != null).map(([label, value, className = ""]) => `<div><dt>${escapeHtml(label)}</dt><dd class="${escapeHtml(className)}">${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+  }
+
+  function renderInspector(scope, item = null) {
+    const browserState = state.fileBrowsers[scope];
+    const result = browserState.currentResult;
+    const root = $(`#${scope}-inspector`);
+    if (!browserState.date) {
+      root.innerHTML = `<div class="inspector-hero"><span class="file-icon folder">${icon("calendar")}</span><strong>全部归档</strong><small>${browserState.dates.length} 个日期</small></div>${inspectorFields([["位置", scope === "remote" ? "Google Drive" : "本地归档"], ["采集服务器", $(`#${scope}-profile`).selectedOptions[0]?.textContent || "--"]])}`;
+      return;
+    }
+    if (!item) {
+      const [statusLabel] = statusMap[result?.state] || [result?.state || "未知", ""];
+      const title = browserState.path.split("/").filter(Boolean).at(-1) || browserState.date;
+      root.innerHTML = `<div class="inspector-hero"><span class="file-icon folder">${icon(browserState.path ? "folder" : "calendar")}</span><strong>${escapeHtml(title)}</strong><small>${browserState.path ? "文件夹" : "归档日期"}</small></div>${inspectorFields([["路径", browserState.path || "归档根目录"], ["项目", `${Number(result?.entry_count || 0)} 项`], ["数据量", bytes(result?.bytes_total)], ["记录数", Number(result?.row_count || 0).toLocaleString("zh-CN")], ["状态", statusLabel], ["说明", result?.detail || ""]])}`;
+      return;
+    }
+    const visual = entryVisual(item);
+    const isDirectory = item.type === "directory";
+    const local = localObjectStatus[item.local_state] || [item.local_state || "--", ""];
+    const location = item.state === "downloading" ? "下载中" : item.location === "verified" ? "已验证目录" : item.location === "partial" ? "暂存目录" : (item.locations || []).join(" + ");
+    const fields = isDirectory
+      ? [["路径", item.path], ["内容", `${Number(item.entry_count || 0)} 个对象`], ["位置", (item.locations || []).join(" + ")]]
+      : scope === "remote"
+        ? [["路径", item.path], ["类型", [item.kind, item.table_name].filter(Boolean).join(" · ") || visual.label], ["大小", bytes(item.size_bytes)], ["记录数", Number(item.row_count || 0).toLocaleString("zh-CN")], ["本地状态", local[0]], ["SHA-256", item.sha256 || "--", "mono"]]
+        : [["路径", item.path], ["类型", visual.label], ["位置", location || "本地"], ["大小", bytes(item.size_bytes)], ["网盘清单", item.remote_state === "listed" ? "已列入" : item.remote_state === "control" ? "控制文件" : "仅本地"], ["修改时间", timeText(item.modified_at)]];
+    root.innerHTML = `<div class="inspector-hero"><span class="file-icon ${visual.className}">${icon(visual.iconName)}</span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(visual.label)}</small></div>${inspectorFields(fields)}`;
   }
 
   function navigateUp(scope) {
@@ -778,37 +868,83 @@
   }
 
   function renderFileList(scope, result) {
-    const entries = result.entries || [];
-    state.fileBrowsers[scope].date = result.archive_date || state.fileBrowsers[scope].date;
-    state.fileBrowsers[scope].path = result.path || "";
-    const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
-    renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "", result.archive_date || state.fileBrowsers[scope].date);
+    const browserState = state.fileBrowsers[scope];
+    browserState.date = result.archive_date || browserState.date;
+    browserState.path = result.path || "";
+    browserState.currentResult = result;
+    browserState.query = "";
+    $(`#${scope}-search`).value = "";
+    $(`#${scope}-search`).disabled = false;
+    renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "", result.archive_date || browserState.date);
     if (scope === "remote") {
       updateRemoteDownloadAction(result);
     }
-    $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.entry_count || 0)} 项</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
+    renderDirectoryTree(scope);
+    renderLocationSummary(scope);
+    renderInspector(scope);
+    renderFileRows(scope);
+  }
+
+  function renderFileRows(scope) {
+    const browserState = state.fileBrowsers[scope];
+    const result = browserState.currentResult || {};
+    const entries = result.entries || [];
+    const query = browserState.query.trim().toLocaleLowerCase("zh-CN");
+    const visible = entries.map((item, index) => ({ item, index })).filter(({ item }) => {
+      if (!query) return true;
+      return [item.name, item.path, item.kind, item.table_name, item.location, ...(item.locations || [])]
+        .filter(Boolean).join(" ").toLocaleLowerCase("zh-CN").includes(query);
+    });
+    const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
+    const matchText = query ? `<span><strong>${visible.length}</strong> / ${entries.length} 项匹配</span>` : `<span>${Number(result.entry_count || entries.length)} 项</span>`;
+    $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date || browserState.date)}</strong></span>${matchText}<span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span>`;
     const body = $(`#${scope}-files-body`);
-    if (!entries.length) {
+    if (!visible.length) {
       const columns = scope === "remote" ? 6 : 5;
-      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">当前目录没有可显示的文件</td></tr>`;
+      body.innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${query ? "没有匹配的文件或文件夹" : "当前目录没有可显示的文件"}</td></tr>`;
       return;
     }
     if (scope === "remote") {
-      body.innerHTML = entries.map(item => {
-        if (item.type === "directory") return `<tr class="directory-row"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${Number(item.entry_count || 0)} 个对象</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>文件夹</td><td>--</td><td>--</td><td>--</td><td>--</td></tr>`;
+      body.innerHTML = visible.map(({ item, index }) => {
+        if (item.type === "directory") return `<tr class="directory-row" data-entry-index="${index}" tabindex="0"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${Number(item.entry_count || 0)} 个对象</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>文件夹</td><td>--</td><td>--</td><td>--</td><td>--</td></tr>`;
         const local = localObjectStatus[item.local_state] || [item.local_state || "未知", ""];
         const type = [item.kind, item.table_name].filter(Boolean).join(" · ") || "归档对象";
-        return `<tr><td><div class="file-entry"><span class="file-icon file">${icon("file")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
+        const visual = entryVisual(item);
+        return `<tr data-entry-index="${index}" tabindex="0"><td><div class="file-entry"><span class="file-icon ${visual.className}">${icon(visual.iconName)}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td>${escapeHtml(type)}</td><td>${bytes(item.size_bytes)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${local[1]}">${escapeHtml(local[0])}</span></td><td class="hash" title="${escapeHtml(item.sha256)}">${escapeHtml(String(item.sha256 || "").slice(0, 12))}</td></tr>`;
       }).join("");
     } else {
-      body.innerHTML = entries.map(item => {
-        if (item.type === "directory") return `<tr class="directory-row"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml((item.locations || [item.location]).join(" + "))}</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${escapeHtml((item.locations || [item.location]).join(" + "))}</td><td>--</td><td>--</td><td>--</td></tr>`;
+      body.innerHTML = visible.map(({ item, index }) => {
+        if (item.type === "directory") return `<tr class="directory-row" data-entry-index="${index}" tabindex="0"><td><button class="folder-link" data-path="${escapeHtml(item.path)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml((item.locations || [item.location]).filter(Boolean).join(" + "))}</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${escapeHtml((item.locations || [item.location]).filter(Boolean).join(" + "))}</td><td>--</td><td>--</td><td>--</td></tr>`;
         const location = item.state === "downloading" ? ["下载中", "warn"] : item.location === "verified" ? ["已验证目录", "good"] : ["暂存目录", "warn"];
         const remote = item.remote_state === "listed" ? ["已列入", "good"] : item.remote_state === "control" ? ["控制文件", ""] : ["仅本地", "warn"];
-        return `<tr><td><div class="file-entry"><span class="file-icon file">${icon("file")}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
+        const visual = entryVisual(item);
+        return `<tr data-entry-index="${index}" tabindex="0"><td><div class="file-entry"><span class="file-icon ${visual.className}">${icon(visual.iconName)}</span><span class="file-entry-label"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.path)}</small></span></div></td><td><span class="state-pill ${location[1]}">${location[0]}</span></td><td>${bytes(item.size_bytes)}</td><td><span class="state-pill ${remote[1]}">${remote[0]}</span></td><td>${timeText(item.modified_at)}</td></tr>`;
       }).join("");
     }
-    $$(".folder-link", body).forEach(button => button.addEventListener("click", () => loadFileList(scope, button.dataset.path || "")));
+    $$(".folder-link", body).forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      loadFileList(scope, button.dataset.path || "");
+    }));
+    $$('[data-entry-index]', body).forEach(row => {
+      const select = () => selectBrowserEntry(scope, entries[Number(row.dataset.entryIndex)], row);
+      row.addEventListener("click", select);
+      row.addEventListener("dblclick", () => {
+        const item = entries[Number(row.dataset.entryIndex)];
+        if (item?.type === "directory") loadFileList(scope, item.path || "");
+      });
+      row.addEventListener("keydown", event => {
+        if (event.key !== "Enter") return;
+        const item = entries[Number(row.dataset.entryIndex)];
+        if (item?.type === "directory") loadFileList(scope, item.path || "");
+        else select();
+      });
+    });
+  }
+
+  function selectBrowserEntry(scope, item, row) {
+    if (!item) return;
+    $$(`#${scope}-files-body tr[data-entry-index]`).forEach(current => current.classList.toggle("selected", current === row));
+    renderInspector(scope, item);
   }
 
   function renderFileBreadcrumbs(scope, path, parentPath, archiveDate) {
@@ -976,6 +1112,13 @@
     });
     $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope, true));
     $(`#${scope}-up`).addEventListener("click", () => navigateUp(scope));
+    $(`#${scope}-search`).addEventListener("input", event => {
+      const browserState = state.fileBrowsers[scope];
+      if (!browserState.currentResult) return;
+      browserState.query = event.currentTarget.value || "";
+      renderInspector(scope);
+      renderFileRows(scope);
+    });
   }
   $("#scan-only").addEventListener("click", () => runScan(false));
   $("#scan-download").addEventListener("click", () => runScan(true));
