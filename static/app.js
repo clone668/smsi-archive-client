@@ -93,7 +93,9 @@
   }
 
   function switchPage(pageName) {
-    $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === pageName));
+    if (pageName === "files") pageName = "remote-files";
+    const navPage = ["remote-files", "local-files"].includes(pageName) ? "files" : pageName;
+    $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === navPage));
     $$(".page").forEach(page => page.classList.toggle("active", page.id === `${pageName}-page`));
     if (pageName === "jobs") renderJobs();
     if (pageName === "remote-files") loadFileDates("remote");
@@ -251,7 +253,7 @@
     const body = $("#days-body");
     const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
     $("#day-summary").textContent = `${state.days.length} 条本地状态记录`;
-    if (!state.days.length) { body.innerHTML = '<tr><td colspan="7" class="empty-cell">暂无记录</td></tr>'; return; }
+    if (!state.days.length) { body.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无记录</td></tr>'; return; }
     body.innerHTML = state.days.map(item => {
       const live = state.runtime?.progress;
       const liveMatches = live && live.profile_id === item.profile_id && live.archive_date === item.archive_date && ["downloading", "verifying"].includes(live.phase);
@@ -260,6 +262,14 @@
       const bytesDone = liveMatches ? Number(live.bytes_transferred || live.bytes_done || 0) : Number(item.bytes_done || 0);
       const bytesTotal = liveMatches ? Number(live.bytes_total || item.bytes_total || 0) : Number(item.bytes_total || 0);
       const [label, tone] = statusMap[item.status] || [item.status, ""];
+      const report = item.report_summary || {};
+      const reportStatus = {
+        healthy: ["健康", "good"], attention: ["需关注", "warn"],
+        critical: ["严重", "bad"], unknown: ["证据不足", ""],
+      }[report.status] || ["未生成", ""];
+      const reportText = report.status
+        ? `${reportStatus[0]}${Number(report.issue_count || 0) ? ` · ${Number(report.issue_count)} 项` : ""}`
+        : "未生成";
       const liveDetail = liveMatches ? [
         live.current_object ? `当前 ${live.current_object.split("/").at(-1)}` : "",
         live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "",
@@ -269,7 +279,7 @@
       const dataText = objectCount ? `${bytesDone ? bytes(bytesDone) : "0 B"} / ${bytes(bytesTotal)}` : bytes(bytesTotal);
       const statusDetail = liveDetail ? `<small class="row-progress-detail">${escapeHtml(liveDetail)}</small>` : "";
       const action = `${item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}" ${taskBusy() ? "disabled" : ""}>重新校验</button>` : ""}<button class="button small quiet day-detail-toggle" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">文件详情</button>`;
-      return `<tr title="${escapeHtml(detailText)}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span>${statusDetail}</td><td>${objectsDone}/${objectCount}</td><td>${dataText}</td><td>${timeText(item.updated_at)}</td><td class="row-actions">${action}</td></tr><tr class="day-detail-row hidden"><td colspan="7"><div class="day-detail-content"></div></td></tr>`;
+      return `<tr title="${escapeHtml(detailText)}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span>${statusDetail}</td><td><span class="state-pill ${reportStatus[1]}" title="${escapeHtml((report.top_issues || []).map(issue => issue.title || issue.code).join("；"))}">${escapeHtml(reportText)}</span></td><td>${objectsDone}/${objectCount}</td><td>${dataText}</td><td>${timeText(item.updated_at)}</td><td class="row-actions">${action}</td></tr><tr class="day-detail-row hidden"><td colspan="8"><div class="day-detail-content"></div></td></tr>`;
     }).join("");
     $$(".verify-day", body).forEach(button => button.addEventListener("click", () => verifyDay(button.dataset.profile, button.dataset.date)));
     $$(".day-detail-toggle", body).forEach(button => button.addEventListener("click", () => toggleDayDetail(button)));
@@ -330,7 +340,17 @@
       const result = await api(`/api/day-detail${query}`);
       const detail = result.detail;
       const remoteState = statusMap[detail.remote.state] || [detail.remote.state, ""];
-      content.innerHTML = `<div class="day-detail-summary"><span>远端：<strong class="state-text ${remoteState[1]}">${escapeHtml(remoteState[0])}</strong> · ${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.remote.bytes_total)}</span><span>本地：${Number(detail.local.object_count || 0)}/${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.local.bytes_done)} / ${bytes(detail.remote.bytes_total)}</span><span>${escapeHtml(detail.remote.detail || detail.local.detail || "")}</span></div>${detail.objects.length ? `<div class="table-wrap"><table class="object-table"><thead><tr><th>对象</th><th>远端</th><th>本地</th><th>大小</th><th>本地字节</th></tr></thead><tbody>${detail.objects.map(item => { const state = localObjectStatus[item.local_state] || [item.local_state, ""]; return `<tr><td title="${escapeHtml(item.relative_key)}">${escapeHtml(item.name)}</td><td><span class="state-pill good">已列入 manifest</span></td><td><span class="state-pill ${state[1]}">${escapeHtml(state[0])}</span></td><td>${bytes(item.size_bytes)}</td><td>${bytes(item.local_bytes)}</td></tr>`; }).join("")}</tbody></table></div>` : '<p class="empty-cell">远端尚未发布可读取的 manifest。</p>'}`;
+      const report = detail.report_summary || {};
+      const reportStatus = {
+        healthy: ["健康", "good"], attention: ["需关注", "warn"],
+        critical: ["严重", "bad"], unknown: ["证据不足", ""],
+      }[report.status] || ["未生成", ""];
+      const sourceCounts = report.source_counts || {};
+      const reportLine = report.status
+        ? `运行报告：${reportStatus[0]} · 问题 ${Number(report.issue_count || 0)} 项 · 来源健康 ${Number(sourceCounts.healthy || 0)} / 关注 ${Number(sourceCounts.attention || 0)} / 严重 ${Number(sourceCounts.critical || 0)} / 未知 ${Number(sourceCounts.unknown || 0)}`
+        : "运行报告：未读取";
+      const issueLine = (report.top_issues || []).map(issue => `${issue.title || issue.code}${issue.action ? `；${issue.action}` : ""}`).join(" | ");
+      content.innerHTML = `<div class="day-detail-summary"><span>远端：<strong class="state-text ${remoteState[1]}">${escapeHtml(remoteState[0])}</strong> · ${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.remote.bytes_total)}</span><span>本地：${Number(detail.local.object_count || 0)}/${Number(detail.remote.object_count || 0)} 个对象 · ${bytes(detail.local.bytes_done)} / ${bytes(detail.remote.bytes_total)}</span><span>${escapeHtml(reportLine)}</span>${issueLine ? `<span class="detail-note">主要问题：${escapeHtml(issueLine)}</span>` : ""}<span>${escapeHtml(detail.remote.detail || detail.local.detail || "")}</span></div>${detail.objects.length ? `<div class="table-wrap"><table class="object-table"><thead><tr><th>对象</th><th>远端</th><th>本地</th><th>大小</th><th>本地字节</th></tr></thead><tbody>${detail.objects.map(item => { const state = localObjectStatus[item.local_state] || [item.local_state, ""]; return `<tr><td title="${escapeHtml(item.relative_key)}">${escapeHtml(item.name)}</td><td><span class="state-pill good">已列入 manifest</span></td><td><span class="state-pill ${state[1]}">${escapeHtml(state[0])}</span></td><td>${bytes(item.size_bytes)}</td><td>${bytes(item.local_bytes)}</td></tr>`; }).join("")}</tbody></table></div>` : '<p class="empty-cell">远端尚未发布可读取的 manifest。</p>'}`;
       detailRow.dataset.loaded = "true";
     } catch (error) { content.innerHTML = `<p class="form-error">${escapeHtml(error.message)}</p>`; }
   }

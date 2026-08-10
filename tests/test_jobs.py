@@ -5,6 +5,22 @@ from archive_backup.database import StateDatabase
 from archive_backup.service import ArchiveService
 
 
+def test_archive_day_report_summary_round_trips_as_object(tmp_path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    database.upsert_day(
+        "collector-a",
+        "2026-08-09",
+        status="verified",
+        report_summary='{"issue_count":1,"status":"attention"}',
+    )
+
+    day = database.day("collector-a", "2026-08-09")
+    assert day["report_summary"] == {
+        "issue_count": 1,
+        "status": "attention",
+    }
+
+
 def test_job_lifecycle_and_object_progress_are_persistent(tmp_path) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
     job = database.create_job(

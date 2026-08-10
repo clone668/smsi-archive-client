@@ -5,10 +5,11 @@ import os
 import shutil
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .config import ClientConfig, ProfileConfig
 from .comparison import build_archive_comparisons
@@ -76,6 +77,66 @@ class ArchiveManager:
 
     def staging_root(self, profile: ProfileConfig, archive_date: str) -> Path:
         return self.profile_root(profile) / ".partial" / f"date={archive_date}"
+
+    def _runtime_report_summary(
+        self, root: Path, snapshot: ManifestSnapshot
+    ) -> dict[str, Any]:
+        report_items = [
+            item for item in snapshot.objects
+            if item.get("kind") == "runtime_report"
+        ]
+        if len(report_items) != 1:
+            return {}
+        report_item = report_items[0]
+        report_path = local_object_path(
+            root, str(report_item.get("relative_key") or ""), snapshot.archive_date
+        )
+        if (
+            not report_path.is_file()
+            or report_path.stat().st_size != int(report_item.get("size_bytes") or -1)
+            or sha256_file(report_path) != str(report_item.get("sha256") or "")
+        ):
+            return {}
+        report = read_json(report_path, 4 * 1024 * 1024)
+        if not report:
+            return {}
+        collection = report.get("collection_sources")
+        collection = collection if isinstance(collection, Mapping) else {}
+        sources = collection.get("sources")
+        sources = sources if isinstance(sources, list) else []
+        source_counts = Counter(
+            str((item.get("quality") or {}).get("status") or "unknown")
+            for item in sources
+            if isinstance(item, Mapping) and isinstance(item.get("quality"), Mapping)
+        )
+        summary = report.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+        raw_issues = summary.get("top_issues")
+        raw_issues = raw_issues if isinstance(raw_issues, list) else []
+        issue_counts = summary.get("issue_counts")
+        top_issues = [
+            {
+                "severity": str(item.get("severity") or "unknown"),
+                "title": str(item.get("title") or item.get("code") or ""),
+                "action": str(item.get("action") or ""),
+            }
+            for item in raw_issues[:3]
+            if isinstance(item, Mapping)
+        ]
+        return {
+            "status": str(report.get("overall_status") or "unknown"),
+            "issue_count": int(summary.get("issue_count") or 0),
+            "issue_counts": dict(issue_counts) if isinstance(issue_counts, Mapping) else {},
+            "source_counts": dict(source_counts),
+            "top_issues": top_issues,
+            "generated_at": str(report.get("generated_at") or ""),
+        }
+
+    def _report_summary_json(
+        self, root: Path, snapshot: ManifestSnapshot
+    ) -> str:
+        summary = self._runtime_report_summary(root, snapshot)
+        return json.dumps(summary, ensure_ascii=False, sort_keys=True) if summary else ""
 
     def quarantine_root(self, profile: ProfileConfig) -> Path:
         return self.profile_root(profile) / ".quarantine"
@@ -241,6 +302,9 @@ class ArchiveManager:
         archive_date = snapshot.archive_date
         existing = self._verified_receipt(profile, archive_date, snapshot)
         if existing:
+            report_summary = self._report_summary_json(
+                self.final_root(profile, archive_date), snapshot
+            )
             self.database.upsert_day(
                 profile.profile_id,
                 archive_date,
@@ -252,6 +316,7 @@ class ArchiveManager:
                 bytes_total=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 detail="本地恢复验证已通过",
+                report_summary=report_summary,
                 error="",
             )
             return existing
@@ -476,6 +541,7 @@ class ArchiveManager:
             objects_done=snapshot.object_count,
             bytes_done=bytes_total,
             detail="下载完成，恢复验证通过",
+            report_summary=self._report_summary_json(final, snapshot),
             error="",
         )
         self.database.event(
@@ -531,6 +597,9 @@ class ArchiveManager:
             )
             return None
         if receipt:
+            report_summary = self._report_summary_json(
+                self.final_root(profile, archive_date), snapshot
+            )
             self.database.upsert_day(
                 profile.profile_id, archive_date, status="verified",
                 manifest_sha256=snapshot.sha256, object_count=snapshot.object_count,
@@ -538,6 +607,7 @@ class ArchiveManager:
                 bytes_total=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 detail="本地已完整验证", error="",
+                report_summary=report_summary,
             )
             return receipt
         self.database.upsert_day(
@@ -631,6 +701,7 @@ class ArchiveManager:
                 "final_exists": final.is_dir(),
                 "staging_exists": stage.is_dir(),
             },
+            "report_summary": self._runtime_report_summary(final, snapshot) if snapshot else {},
             "objects": objects,
         }
 
@@ -1180,7 +1251,14 @@ class ArchiveManager:
             "downloaded_bytes_this_run": 0,
         })
         write_json_atomic(root / ".smsi-verified.json", report)
-        self.database.upsert_day(profile_id, archive_date, status="verified", detail="重新恢复验证通过", error="")
+        self.database.upsert_day(
+            profile_id,
+            archive_date,
+            status="verified",
+            detail="重新恢复验证通过",
+            report_summary=self._report_summary_json(root, snapshot),
+            error="",
+        )
         self.database.event("info", "本地归档重新恢复验证完成", profile_id=profile_id, archive_date=archive_date)
         self.refresh_comparisons()
         return report

@@ -40,6 +40,7 @@ class StateDatabase:
                     row_count INTEGER NOT NULL DEFAULT 0,
                     bytes_total INTEGER NOT NULL DEFAULT 0,
                     bytes_done INTEGER NOT NULL DEFAULT 0,
+                    report_summary TEXT NOT NULL DEFAULT '',
                     detail TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
@@ -122,6 +123,14 @@ class StateDatabase:
                     ON archive_job_items(job_id, status, relative_key);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(archive_days)").fetchall()
+            }
+            if "report_summary" not in columns:
+                connection.execute(
+                    "ALTER TABLE archive_days ADD COLUMN report_summary TEXT NOT NULL DEFAULT ''"
+                )
 
     def create_job(
         self,
@@ -374,6 +383,7 @@ class StateDatabase:
             "row_count",
             "bytes_total",
             "bytes_done",
+            "report_summary",
             "detail",
             "error",
         }
@@ -403,7 +413,7 @@ class StateDatabase:
                 "SELECT * FROM archive_days WHERE profile_id=? AND archive_date=?",
                 (profile_id, archive_date),
             ).fetchone()
-        return dict(row) if row else None
+        return self._decode_day(row) if row else None
 
     def days(self, limit: int = 500) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 5000))
@@ -412,7 +422,21 @@ class StateDatabase:
                 "SELECT * FROM archive_days ORDER BY archive_date DESC, profile_id LIMIT ?",
                 (bounded,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._decode_day(row) for row in rows]
+
+    @staticmethod
+    def _decode_day(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        raw_summary = payload.get("report_summary")
+        if isinstance(raw_summary, str) and raw_summary:
+            try:
+                parsed = json.loads(raw_summary)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = {}
+            payload["report_summary"] = parsed if isinstance(parsed, dict) else {}
+        else:
+            payload["report_summary"] = {}
+        return payload
 
     def event(
         self,

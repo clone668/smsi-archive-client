@@ -12,8 +12,7 @@
       <div class="brand"><span class="brand-mark small">S</span><span><b>SMSI</b><small>归档中心 · v{{ client_version }}</small></span></div>
       <nav class="side-nav" aria-label="主导航">
         <span class="nav-section-label">文件</span>
-        <button class="nav-item active" data-page="remote-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z"/></svg><span><b>Google Drive</b><small>云端归档</small></span></button>
-        <button class="nav-item" data-page="local-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>本地归档</b><small>已验证与暂存</small></span></button>
+        <button class="nav-item active" data-page="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>归档文件</b><small>云端与本地浏览</small></span></button>
         <span class="nav-section-label">管理</span>
         <button class="nav-item" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>运行总览</b><small>归档与存储状态</small></span></button>
         <button class="nav-item" data-page="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span><b>传输任务</b><small id="nav-job-state">当前空闲</small></span></button>
@@ -78,8 +77,8 @@
             <div class="section-heading"><div><h2>归档日期</h2><p id="day-summary">最近记录</p></div></div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>日期</th><th>采集服务器</th><th>状态</th><th>对象</th><th>数据量</th><th>更新时间</th><th></th></tr></thead>
-                <tbody id="days-body"><tr><td colspan="7" class="empty-cell">暂无记录</td></tr></tbody>
+                <thead><tr><th>日期</th><th>采集服务器</th><th>归档状态</th><th>报告</th><th>对象</th><th>数据量</th><th>更新时间</th><th></th></tr></thead>
+                <tbody id="days-body"><tr><td colspan="8" class="empty-cell">暂无记录</td></tr></tbody>
               </table>
             </div>
           </div>

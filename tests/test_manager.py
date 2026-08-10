@@ -46,7 +46,27 @@ def test_verified_directory_downloads_and_publishes_atomically(tmp_path, archive
     assert (final / "manifest.json").read_bytes() == fixture["manifest_raw"]
     target = final / "business" / "table=price_data" / "day" / "part-00000.parquet"
     assert hashlib.sha256(target.read_bytes()).hexdigest() == fixture["manifest"]["objects"][0]["sha256"]
-    assert database.day("collector-a", "2026-08-07")["status"] == "verified"
+    day = database.day("collector-a", "2026-08-07")
+    assert day["status"] == "verified"
+    assert day["report_summary"]["status"] == "healthy"
+    assert day["report_summary"]["source_counts"] == {"healthy": 1}
+
+
+def test_runtime_report_summary_ignores_report_that_no_longer_matches_manifest(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, _profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
+    report["overall_status"] = "critical"
+    fixture["report_path"].write_text(json.dumps(report), encoding="utf-8")
+
+    snapshot = parse_manifest(fixture["manifest_raw"], fixture["archive_date"])
+    result = manager._runtime_report_summary(fixture["day_root"], snapshot)
+
+    assert result == {}
 
 
 def test_download_reports_byte_progress_without_changing_verification_gate(tmp_path, archive_fixture) -> None:
