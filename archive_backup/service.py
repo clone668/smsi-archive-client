@@ -151,9 +151,6 @@ class ArchiveService:
 
     def _execute(self, job_id: int, action: str, arguments: dict[str, str]) -> str:
         config = self.store.load()
-        runtime_config = getattr(self.store, "runtime_config", None)
-        if callable(runtime_config):
-            config = runtime_config(config)
         manager = ArchiveManager(
             config,
             self.database,

@@ -1,11 +1,11 @@
 # SMSI 归档备份客户端
 
-跨平台、只读的 SMSI 长期归档下载与验证客户端。Ubuntu 负责全天从 Google Drive 拉取并生成已验证本地副本；Windows 可在工作时间通过局域网只读 SFTP 下载这些已验证归档。
+SMSI Ubuntu 长期归档下载与验证客户端。Ubuntu 负责从 Google Drive 拉取归档、完成校验并发布本地副本，同时提供 Web 运维界面。
 
 ## 数据路径
 
 ```text
-采集服务器 -> Google Drive -> Ubuntu 已验证副本 -> Windows 已验证副本
+采集服务器 -> Google Drive -> Ubuntu 已验证副本
 ```
 
 客户端不会调用 Google Drive 删除、移动或同步删除命令。来源文件缺失时，本地已验证副本保持不变。
@@ -31,17 +31,6 @@
 
 “客户端更新”是独立页面。“检查更新”只读取 GitHub `main` 的提交信息；发现新版本后点击“开始更新”，页面显示下载阶段、字节进度、速度和预计剩余时间。更新包会先保存到状态目录并校验，不会替换正在运行的代码，也不会自动重启服务。客户端空闲时“重启客户端”始终可用：有已校验更新时先切换版本，没有更新时只重启当前版本。Ubuntu 更新助手会再次检查没有下载或校验任务，运行中的归档任务不会被中断。更新助手只接受固定版本号和固定运行目录，不能执行任意命令。首次安装或更新助手变更时，仍需重新运行 `deploy/install_ubuntu.sh`。
 
-## Windows
-
-1. 安装 Python 3.10 或更高版本。启动脚本会检查用于 Ubuntu SFTP 的 rclone，缺少时通过 winget 安装。
-2. 运行 `Windows一键启动.cmd`（`启动客户端.cmd` 也是同一入口），脚本会准备虚拟环境并打开 Windows 原生桌面客户端；不启动 Web 服务、不打开浏览器，也不连接 Google Drive。
-3. 在“设置”中填写唯一的 Ubuntu SFTP 只读连接，根目录保持 `/archive`，并选择私钥和独立的 `known_hosts` 文件。
-4. 在“归档同步”点击“同步缺失归档”。客户端自动发现 `/archive` 下全部 `collector=*`，逐个复制已发布归档并执行 SHA-256、Parquet schema、行数和业务内容摘要校验。
-
-正常启动不会保留黑色控制台；环境检查日志位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\windows-launcher.log`，桌面程序启动异常时详见同目录下的 `desktop-error.log`。
-
-Windows 只保存一条 Ubuntu 根连接，不保存采集服务器列表。以后新增 `collector=*` 目录会被自动识别；Ubuntu 删除源文件不会删除 Windows 已验证副本。
-
 ## Ubuntu
 
 ```bash
@@ -66,14 +55,6 @@ sudo systemctl start smsi-archive-client
 systemctl status smsi-archive-client
 journalctl -u smsi-archive-client -n 100 --no-pager
 ```
-
-为 Windows 启用 Ubuntu 只读 SFTP：
-
-```bash
-sudo bash deploy/setup_sftp_reader.sh /path/to/windows-client.pub
-```
-
-脚本创建无密码、无命令执行权限的 `smsi-archive-reader` 用户，并将 `/data/smsi-archive` 只读映射为该用户唯一可见的 `/archive`。Windows 私钥不得上传到 Ubuntu 或提交到 Git。
 
 ## 开发测试
 

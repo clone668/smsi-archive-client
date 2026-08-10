@@ -17,6 +17,7 @@ from pathlib import Path
 
 REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
 RUNTIME_PATHS = ("app.py", "archive_backup", "static", "templates", "requirements.txt")
+OBSOLETE_RUNTIME_PATHS = ("archive_backup/desktop.py",)
 INSTALL_DIR = Path("/data/smsi-archive-client")
 STATE_DIR = Path("/data/smsi-archive-client-state")
 SERVICE = "smsi-archive-client.service"
@@ -105,8 +106,16 @@ def _activate(revision: str) -> None:
                 backup_path = backup / destination.relative_to(INSTALL_DIR)
                 backup_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(destination, backup_path)
+        for relative in OBSOLETE_RUNTIME_PATHS:
+            destination = INSTALL_DIR / relative
+            if destination.is_file():
+                backup_path = backup / relative
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, backup_path)
         for source, destination in files:
             _copy_file_atomic(source, destination)
+        for relative in OBSOLETE_RUNTIME_PATHS:
+            (INSTALL_DIR / relative).unlink(missing_ok=True)
         marker = INSTALL_DIR / ".smsi-release"
         marker.parent.mkdir(parents=True, exist_ok=True)
         temporary_marker = marker.with_name(f".{marker.name}.tmp")

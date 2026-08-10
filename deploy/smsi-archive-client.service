@@ -13,7 +13,7 @@ ExecStart=@@INSTALL_DIR@@/.venv/bin/python @@INSTALL_DIR@@/app.py
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
-# 状态目录本身为 0700，组成员不能进入；归档目录中的对象则可由只读 SFTP 组读取。
+# 归档文件默认仅对服务账号和服务组可读。
 UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true

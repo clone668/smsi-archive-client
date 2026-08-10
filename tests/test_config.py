@@ -37,33 +37,6 @@ def test_password_minimum_is_six_characters(tmp_path) -> None:
         store.change_password("12345")
 
 
-def test_sftp_profile_requires_key_and_known_hosts() -> None:
-    profile = ProfileConfig(
-        profile_id="collector-a",
-        display_name="A",
-        collector_id="collector-a",
-        source_type="ubuntu_sftp",
-        sftp_host="192.168.2.240",
-    )
-    errors = profile.validate()
-    assert "Ubuntu SFTP 私钥文件不能为空" in errors
-    assert "Ubuntu SFTP known_hosts 文件不能为空" in errors
-
-
-def test_sftp_profile_builds_collector_root() -> None:
-    profile = ProfileConfig(
-        profile_id="collector-a",
-        display_name="A",
-        collector_id="collector-a",
-        source_type="ubuntu_sftp",
-        sftp_host="192.168.2.240",
-        sftp_key_file="client.key",
-        sftp_known_hosts_file="known_hosts",
-    )
-    assert profile.validate() == []
-    assert profile.sftp_archive_root == "/archive/collector=collector-a"
-
-
 def test_ubuntu_v1_config_adds_missing_default_collectors_once() -> None:
     payload, changed = _migrate_config_payload(
         {
@@ -89,3 +62,22 @@ def test_ubuntu_v1_config_adds_missing_default_collectors_once() -> None:
     migrated_again, changed_again = _migrate_config_payload(payload, ubuntu=True)
     assert changed_again is False
     assert len(migrated_again["profiles"]) == 2
+
+
+def test_legacy_sftp_profile_is_removed_during_config_migration() -> None:
+    payload, changed = _migrate_config_payload(
+        {
+            "config_version": 2,
+            "profiles": [{
+                "profile_id": "ubuntu",
+                "display_name": "Ubuntu",
+                "collector_id": "all",
+                "source_type": "ubuntu_sftp",
+            }],
+        },
+        ubuntu=True,
+    )
+
+    assert changed is True
+    assert payload["config_version"] == CONFIG_VERSION
+    assert payload["profiles"] == []

@@ -37,6 +37,7 @@ if [[ "${SOURCE_DIR}" != "${INSTALL_DIR}" ]]; then
   cp -a "${SOURCE_DIR}/archive_backup" "${SOURCE_DIR}/templates" "${SOURCE_DIR}/static" "${INSTALL_DIR}/"
   install -m 0644 "${SOURCE_DIR}/app.py" "${SOURCE_DIR}/requirements.txt" "${INSTALL_DIR}/"
 fi
+rm -f "${INSTALL_DIR}/archive_backup/desktop.py"
 
 python3 -m venv "${INSTALL_DIR}/.venv"
 "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip

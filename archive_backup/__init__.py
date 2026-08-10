@@ -1,3 +1,3 @@
-"""Cross-platform verified archive backup client."""
+"""Ubuntu verified archive backup client."""
 
-__version__ = "3.3.1"
+__version__ = "4.0.0"
