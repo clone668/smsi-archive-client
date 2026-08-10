@@ -27,41 +27,28 @@ set "PYTHON_ARGS="
 :python_ready
 "%PYTHON_EXE%" %PYTHON_ARGS% --version >>"%LOG_FILE%" 2>&1
 
-where rclone >nul 2>nul
-if not errorlevel 1 goto :rclone_ready
-where winget >nul 2>nul
-if errorlevel 1 goto :rclone_warning
-echo Installing rclone for Google Drive access...
-winget install --id Rclone.Rclone -e --accept-package-agreements --accept-source-agreements >>"%LOG_FILE%" 2>&1
-if errorlevel 1 goto :rclone_warning
-goto :rclone_ready
-
-:rclone_warning
-echo rclone is unavailable. Ubuntu SFTP still works; Google Drive requires rclone.
->>"%LOG_FILE%" echo rclone was not found or could not be installed
-
-:rclone_ready
 if exist ".venv\Scripts\python.exe" goto :venv_ready
 echo Creating the Python environment...
 "%PYTHON_EXE%" %PYTHON_ARGS% -m venv .venv >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :failed
 
 :venv_ready
-".venv\Scripts\python.exe" -c "from pathlib import Path; import sys; marker=Path('.venv/requirements.installed'); current=Path('requirements.txt').read_bytes(); sys.exit(0 if marker.exists() and marker.read_bytes()==current else 1)" >>"%LOG_FILE%" 2>&1
+".venv\Scripts\python.exe" -c "from pathlib import Path; import sys; marker=Path('.venv/requirements-windows.installed'); current=Path('requirements-windows.txt').read_bytes(); sys.exit(0 if marker.exists() and marker.read_bytes()==current else 1)" >>"%LOG_FILE%" 2>&1
 if not errorlevel 1 goto :dependencies_ready
 echo Installing or updating dependencies...
-".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt >>"%LOG_FILE%" 2>&1
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements-windows.txt >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :failed
-copy /y requirements.txt ".venv\requirements.installed" >nul
+copy /y requirements-windows.txt ".venv\requirements-windows.installed" >nul
 
 :dependencies_ready
 ".venv\Scripts\python.exe" -c "import tkinter, pyarrow; import archive_backup.desktop" >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :failed
+if /i "%~1"=="--check" goto :preflight
 if /i "%SMSI_ARCHIVE_PREFLIGHT_ONLY%"=="1" goto :preflight
 
 echo Starting the Windows desktop client...
 >>"%LOG_FILE%" echo [%date% %time%] Starting the native desktop client
-".venv\Scripts\python.exe" -m archive_backup.desktop >>"%LOG_FILE%" 2>&1
+start "" /b ".venv\Scripts\pythonw.exe" -m archive_backup.desktop
 if errorlevel 1 goto :failed
 exit /b 0
 

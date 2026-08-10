@@ -34,11 +34,11 @@
 ## Windows
 
 1. 安装 Python 3.10 或更高版本。
-2. 运行 `Windows一键启动.cmd`（`启动客户端.cmd` 也是同一入口），脚本会准备虚拟环境并打开 Windows 原生桌面客户端；不启动 Web 服务，也不打开浏览器。Google Drive 来源缺少 rclone 时会尝试安装，Ubuntu 内网来源不依赖 rclone。
-3. 用 `rclone config` 创建只读 Google Drive remote。
-4. 再次运行 `Windows一键启动.cmd`，在“设置”中确认下载目录和采集服务器，然后从“文件浏览”选择日期下载。
+2. 运行 `Windows一键启动.cmd`（`启动客户端.cmd` 也是同一入口），脚本会准备虚拟环境并打开 Windows 原生桌面客户端；不启动 Web 服务、不打开浏览器，也不连接 Google Drive。
+3. 在“设置”中添加 Ubuntu SFTP 只读连接，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。
+4. 在“归档同步”点击“同步缺失归档”，客户端会复制已发布归档并执行 SHA-256、Parquet schema、行数和业务内容摘要校验。
 
-若启动失败，窗口会保留并显示错误，完整日志位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\windows-launcher.log`。
+正常启动不会保留黑色控制台；环境检查日志位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\windows-launcher.log`，桌面程序启动异常时详见同目录下的 `desktop-error.log`。
 
 Windows 从 Ubuntu 内网下载时，在来源中选择“Ubuntu 内网（SFTP）”，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。客户端仍会重新执行对象 SHA-256、Parquet schema、行数和业务内容摘要校验；Ubuntu 删除源文件不会删除 Windows 已验证副本。
 

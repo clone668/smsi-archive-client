@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import queue
-import subprocess
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -20,12 +20,6 @@ from .service import ArchiveService
 
 
 ACTIVE_JOB_STATES = {"queued", "running", "cancelling"}
-SOURCE_LABELS = {
-    "google_drive": "Google Drive",
-    "ubuntu_sftp": "Ubuntu 内网",
-    "verified_directory": "已验证目录",
-}
-SOURCE_VALUES = {value: key for key, value in SOURCE_LABELS.items()}
 STATUS_LABELS = {
     "verified": "验证通过",
     "downloading": "下载中",
@@ -62,6 +56,18 @@ def duration_text(value: Any) -> str:
         return f"{minutes} 分 {seconds} 秒"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} 小时 {minutes} 分"
+
+
+def centered_geometry(
+    screen_width: int,
+    screen_height: int,
+    *,
+    width: int = 1040,
+    height: int = 680,
+) -> str:
+    left = max(0, (int(screen_width) - width) // 2)
+    top = max(0, (int(screen_height) - height) // 2)
+    return f"{width}x{height}+{left}+{top}"
 
 
 def cached_directory_result(
@@ -159,6 +165,23 @@ class InstanceLock:
             self.handle = None
 
 
+class DesktopConfigStore(ConfigStore):
+    """Expose only Ubuntu SFTP profiles to the Windows desktop process."""
+
+    def load(self) -> ClientConfig:
+        config = super().load()
+        config.profiles = [
+            profile for profile in config.profiles if profile.source_type == "ubuntu_sftp"
+        ]
+        return config
+
+    def save(self, config: ClientConfig) -> None:
+        config.profiles = [
+            profile for profile in config.profiles if profile.source_type == "ubuntu_sftp"
+        ]
+        super().save(config)
+
+
 class ArchiveDesktopApp:
     COLORS = {
         "bg": "#f3f5f7",
@@ -203,7 +226,6 @@ class ArchiveDesktopApp:
         self.nav_buttons: dict[str, tk.Button] = {}
         self.pages: dict[str, tk.Frame] = {}
         self.setting_vars: dict[str, tk.Variable] = {}
-        self.detail_vars: dict[str, tk.StringVar] = {}
         self._configure_window()
         self._configure_styles()
         self._build_shell()
@@ -230,13 +252,30 @@ class ArchiveDesktopApp:
 
     def _configure_window(self) -> None:
         self.root.title(f"SMSI 归档备份 · {__version__}")
-        self.root.geometry("1380x840")
-        self.root.minsize(1040, 680)
+        width, height = 1040, 680
+        self.root.geometry(
+            centered_geometry(
+                self.root.winfo_screenwidth(),
+                self.root.winfo_screenheight(),
+                width=width,
+                height=height,
+            )
+        )
+        self.root.minsize(width, height)
         self.root.configure(bg=self.COLORS["bg"])
-        try:
-            self.root.state("zoomed")
-        except tk.TclError:
-            pass
+        self.app_icon = self._create_app_icon()
+        self.root.iconphoto(True, self.app_icon)
+
+    def _create_app_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=32, height=32)
+        icon.put(self.COLORS["brand"], to=(0, 0, 32, 32))
+        icon.put("#ffffff", to=(7, 7, 25, 10))
+        icon.put("#ffffff", to=(7, 13, 25, 16))
+        icon.put("#ffffff", to=(7, 19, 25, 22))
+        icon.put(self.COLORS["brand"], to=(14, 5, 18, 19))
+        icon.put("#ffffff", to=(12, 16, 20, 19))
+        icon.put("#ffffff", to=(14, 19, 18, 25))
+        return icon
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -262,7 +301,7 @@ class ArchiveDesktopApp:
     def _build_shell(self) -> None:
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
-        sidebar = tk.Frame(self.root, width=214, bg=self.COLORS["sidebar"])
+        sidebar = tk.Frame(self.root, width=176, bg=self.COLORS["sidebar"])
         sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
         sidebar.grid_propagate(False)
         main = tk.Frame(self.root, bg=self.COLORS["bg"])
@@ -276,21 +315,26 @@ class ArchiveDesktopApp:
         self._build_sidebar(sidebar)
         self._build_files_page()
         self._build_jobs_page()
-        self._build_status_page()
         self._build_settings_page()
         self._build_transfer_bar()
 
     def _build_sidebar(self, parent: tk.Frame) -> None:
         brand = tk.Frame(parent, bg=self.COLORS["sidebar"])
         brand.pack(fill="x", padx=18, pady=(20, 24))
-        mark = tk.Label(brand, text="S", width=2, height=1, bg=self.COLORS["brand"], fg="white", font=("Segoe UI Semibold", 16))
+        mark = tk.Label(
+            brand,
+            image=self.app_icon,
+            width=32,
+            height=32,
+            bg=self.COLORS["sidebar"],
+        )
         mark.pack(side="left")
         name = tk.Frame(brand, bg=self.COLORS["sidebar"])
         name.pack(side="left", padx=(10, 0))
         tk.Label(name, text="SMSI", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_text"], font=("Segoe UI Semibold", 11)).pack(anchor="w")
         tk.Label(name, text=f"归档备份 · {__version__}", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_muted"], font=("Segoe UI", 8)).pack(anchor="w")
         tk.Label(parent, text="工作区", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_muted"], font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=18, pady=(0, 5))
-        for key, label in (("files", "文件浏览"), ("jobs", "传输任务"), ("status", "运行状态"), ("settings", "设置")):
+        for key, label in (("files", "归档同步"), ("jobs", "任务记录"), ("settings", "设置")):
             button = tk.Button(
                 parent,
                 text=label,
@@ -333,46 +377,99 @@ class ArchiveDesktopApp:
 
     def _build_files_page(self) -> None:
         page = self._new_page("files")
-        header = self._page_header(page, "归档文件", "从 Google Drive、Ubuntu 内网或本地验证目录读取")
-        scope_box = tk.Frame(header, bg=self.COLORS["bg"])
-        scope_box.pack(side="right", pady=3)
-        self.scope_buttons: dict[str, tk.Button] = {}
-        for scope, label in (("remote", "云端来源"), ("local", "本地归档")):
-            button = tk.Button(scope_box, text=label, bd=1, relief="solid", padx=14, pady=6, font=("Segoe UI Semibold", 9), command=lambda value=scope: self.set_scope(value))
-            button.pack(side="left", padx=(0, 4))
-            self.scope_buttons[scope] = button
+        header = self._page_header(
+            page,
+            "归档同步",
+            "从 Ubuntu 复制已完成的归档，并在本地自动完成完整校验",
+        )
+        header_actions = tk.Frame(header, bg=self.COLORS["bg"])
+        header_actions.pack(side="right", pady=3)
+        tk.Label(
+            header_actions,
+            text="采集服务器",
+            bg=self.COLORS["bg"],
+            fg=self.COLORS["muted"],
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=(0, 6))
+        self.profile_var = tk.StringVar()
+        self.profile_combo = ttk.Combobox(
+            header_actions,
+            textvariable=self.profile_var,
+            state="readonly",
+            width=18,
+        )
+        self.profile_combo.pack(side="left", padx=(0, 8))
+        self.profile_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._profile_changed()
+        )
+        self.sync_all_button = ttk.Button(
+            header_actions,
+            text="同步缺失归档",
+            style="Primary.TButton",
+            command=lambda: self.request_scan(True),
+        )
+        self.sync_all_button.pack(side="left")
         browser = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         browser.pack(fill="both", expand=True)
         toolbar = tk.Frame(browser, bg=self.COLORS["surface2"], height=54)
         toolbar.pack(fill="x")
         toolbar.pack_propagate(False)
+        scope_box = tk.Frame(toolbar, bg=self.COLORS["surface2"])
+        scope_box.pack(side="left", padx=(10, 8), pady=9)
+        self.scope_buttons: dict[str, tk.Button] = {}
+        for scope, label in (("remote", "Ubuntu"), ("local", "本地副本")):
+            button = tk.Button(
+                scope_box,
+                text=label,
+                bd=1,
+                relief="solid",
+                padx=10,
+                pady=5,
+                font=("Segoe UI Semibold", 9),
+                command=lambda value=scope: self.set_scope(value),
+            )
+            button.pack(side="left")
+            self.scope_buttons[scope] = button
+        self.scope_buttons["remote"].configure(
+            bg=self.COLORS["brand"], fg="#ffffff"
+        )
+        self.scope_buttons["local"].configure(
+            bg=self.COLORS["surface"], fg=self.COLORS["muted"]
+        )
         self.up_button = ttk.Button(toolbar, text="↑", width=3, command=self.go_up)
-        self.up_button.pack(side="left", padx=(10, 4), pady=9)
-        self.refresh_button = ttk.Button(toolbar, text="刷新", command=lambda: self.refresh_dates(force=True))
-        self.refresh_button.pack(side="left", padx=(0, 8), pady=9)
+        self.up_button.pack(side="left", padx=(0, 4), pady=9)
+        self.refresh_button = ttk.Button(
+            toolbar, text="↻", width=3, command=lambda: self.refresh_dates(force=True)
+        )
+        self.refresh_button.pack(side="left", padx=(0, 6), pady=9)
         self.path_var = tk.StringVar(value="归档根目录")
         path_entry = ttk.Entry(toolbar, textvariable=self.path_var, state="readonly")
         path_entry.pack(side="left", fill="x", expand=True, pady=9)
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_current_list())
-        self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=24)
-        self.search_entry.pack(side="left", padx=8, pady=9)
-        self.profile_var = tk.StringVar()
-        self.profile_combo = ttk.Combobox(toolbar, textvariable=self.profile_var, state="readonly", width=22)
-        self.profile_combo.pack(side="left", padx=(0, 8), pady=9)
-        self.profile_combo.bind("<<ComboboxSelected>>", lambda _event: self._profile_changed())
-        self.download_button = ttk.Button(toolbar, text="下载该日期", style="Primary.TButton", command=self.download_selected_date)
+        tk.Label(
+            toolbar,
+            text="搜索",
+            bg=self.COLORS["surface2"],
+            fg=self.COLORS["muted"],
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=(8, 4))
+        self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=18)
+        self.search_entry.pack(side="left", padx=(0, 6), pady=9)
+        self.download_button = ttk.Button(
+            toolbar,
+            text="下载并校验",
+            command=self.download_selected_date,
+        )
         self.download_button.pack(side="left", padx=(0, 10), pady=9)
-        self.file_notice = tk.Label(browser, text="选择采集服务器后读取归档日期", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], padx=12, pady=8, font=("Segoe UI", 9))
+        self.file_notice = tk.Label(browser, text="选择采集服务器后读取归档日期", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], padx=12, pady=7, font=("Segoe UI", 9))
         self.file_notice.pack(fill="x")
         panes = ttk.Panedwindow(browser, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        tree_frame = tk.Frame(panes, bg=self.COLORS["surface2"], width=220)
+        tree_frame = tk.Frame(panes, bg=self.COLORS["surface2"], width=180)
         list_frame = tk.Frame(panes, bg=self.COLORS["surface"])
-        detail_frame = tk.Frame(panes, bg=self.COLORS["surface"], width=270)
         panes.add(tree_frame, weight=0)
         panes.add(list_frame, weight=1)
-        panes.add(detail_frame, weight=0)
         tk.Label(tree_frame, text="目录", anchor="w", bg=self.COLORS["surface2"], fg=self.COLORS["muted"], padx=10, pady=9, font=("Segoe UI Semibold", 9)).pack(fill="x")
         self.directory_tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
         tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.directory_tree.yview)
@@ -380,20 +477,18 @@ class ArchiveDesktopApp:
         tree_scroll.pack(side="right", fill="y")
         self.directory_tree.pack(fill="both", expand=True)
         self.directory_tree.bind("<<TreeviewSelect>>", self._tree_selected)
-        columns = ("type", "size", "rows", "status", "summary")
+        columns = ("type", "size", "status", "local")
         self.file_list = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
         self.file_list.heading("#0", text="名称")
-        self.file_list.heading("type", text="类型 / 数据表")
+        self.file_list.heading("type", text="类型")
         self.file_list.heading("size", text="大小")
-        self.file_list.heading("rows", text="行数")
-        self.file_list.heading("status", text="本地状态")
-        self.file_list.heading("summary", text="摘要")
-        self.file_list.column("#0", width=310, minwidth=190)
-        self.file_list.column("type", width=180, minwidth=120)
-        self.file_list.column("size", width=90, minwidth=70, anchor="e")
-        self.file_list.column("rows", width=100, minwidth=70, anchor="e")
-        self.file_list.column("status", width=105, minwidth=80)
-        self.file_list.column("summary", width=150, minwidth=100)
+        self.file_list.heading("status", text="归档状态")
+        self.file_list.heading("local", text="本地副本")
+        self.file_list.column("#0", width=230, minwidth=170)
+        self.file_list.column("type", width=170, minwidth=110)
+        self.file_list.column("size", width=85, minwidth=70, anchor="e")
+        self.file_list.column("status", width=100, minwidth=80)
+        self.file_list.column("local", width=110, minwidth=90)
         list_y = ttk.Scrollbar(list_frame, orient="vertical", command=self.file_list.yview)
         list_x = ttk.Scrollbar(list_frame, orient="horizontal", command=self.file_list.xview)
         self.file_list.configure(yscrollcommand=list_y.set, xscrollcommand=list_x.set)
@@ -404,20 +499,18 @@ class ArchiveDesktopApp:
         self.file_list.pack(fill="both", expand=True)
         self.file_list.bind("<Double-1>", self._list_open)
         self.file_list.bind("<Return>", self._list_open)
-        self.file_list.bind("<<TreeviewSelect>>", self._list_selected)
-        tk.Label(detail_frame, text="详细信息", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], padx=12, pady=9, font=("Segoe UI Semibold", 9)).pack(fill="x")
-        detail_body = tk.Frame(detail_frame, bg=self.COLORS["surface"])
-        detail_body.pack(fill="both", expand=True, padx=13, pady=8)
-        for key, label in (("name", "名称"), ("type", "类型"), ("path", "路径"), ("size", "大小"), ("rows", "记录数"), ("status", "状态"), ("sha256", "SHA-256")):
-            tk.Label(detail_body, text=label, anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).pack(fill="x", pady=(7, 1))
-            variable = tk.StringVar(value="--")
-            self.detail_vars[key] = variable
-            tk.Label(detail_body, textvariable=variable, anchor="w", justify="left", wraplength=235, bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Consolas", 8) if key == "sha256" else ("Segoe UI", 9)).pack(fill="x")
 
     def _build_jobs_page(self) -> None:
         page = self._new_page("jobs")
-        header = self._page_header(page, "传输任务", "下载、校验与任务恢复记录")
-        ttk.Button(header, text="取消当前任务", style="Danger.TButton", command=self.cancel_task).pack(side="right", pady=4)
+        header = self._page_header(page, "任务记录", "下载、校验与任务恢复记录")
+        self.cancel_button = ttk.Button(
+            header,
+            text="取消当前任务",
+            style="Danger.TButton",
+            command=self.cancel_task,
+            state="disabled",
+        )
+        self.cancel_button.pack(side="right", pady=4)
         surface = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         surface.pack(fill="both", expand=True)
         columns = ("location", "state", "progress", "data", "updated")
@@ -436,92 +529,48 @@ class ArchiveDesktopApp:
         scroll.pack(side="right", fill="y")
         self.jobs_tree.pack(fill="both", expand=True)
 
-    def _build_status_page(self) -> None:
-        page = self._new_page("status")
-        header = self._page_header(page, "运行状态", "自动检查、本地副本和最近操作")
-        actions = tk.Frame(header, bg=self.COLORS["bg"])
-        actions.pack(side="right")
-        ttk.Button(actions, text="检查网盘", command=lambda: self.request_scan(False)).pack(side="left", padx=4)
-        ttk.Button(actions, text="立即同步", style="Primary.TButton", command=lambda: self.request_scan(True)).pack(side="left", padx=4)
-        cards = tk.Frame(page, bg=self.COLORS["bg"])
-        cards.pack(fill="x", pady=(0, 12))
-        self.status_cards: dict[str, tk.StringVar] = {}
-        for key, label in (("runtime", "运行状态"), ("verified", "已验证日期"), ("pending", "待处理"), ("disk", "本地磁盘")):
-            card = tk.Frame(cards, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
-            card.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            tk.Label(card, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(12, 2))
-            variable = tk.StringVar(value="--")
-            self.status_cards[key] = variable
-            tk.Label(card, textvariable=variable, bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 18)).pack(anchor="w", padx=14, pady=(0, 12))
-        surface = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
-        surface.pack(fill="both", expand=True)
-        columns = ("profile", "status", "objects", "data", "updated")
-        self.days_tree = ttk.Treeview(surface, columns=columns, show="tree headings")
-        self.days_tree.heading("#0", text="归档日期")
-        for key, label in (("profile", "采集服务器"), ("status", "状态"), ("objects", "对象"), ("data", "数据量"), ("updated", "更新时间")):
-            self.days_tree.heading(key, text=label)
-        self.days_tree.column("#0", width=130)
-        self.days_tree.column("profile", width=180)
-        self.days_tree.column("status", width=120)
-        self.days_tree.column("objects", width=100)
-        self.days_tree.column("data", width=180)
-        self.days_tree.column("updated", width=170)
-        scroll = ttk.Scrollbar(surface, orient="vertical", command=self.days_tree.yview)
-        self.days_tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.days_tree.pack(fill="both", expand=True)
-
     def _build_settings_page(self) -> None:
         page = self._new_page("settings")
-        header = self._page_header(page, "设置", "本地存储、资源限制和采集服务器来源")
+        header = self._page_header(page, "设置", "本地副本位置和 Ubuntu 连接")
         ttk.Button(header, text="保存设置", style="Primary.TButton", command=self.save_settings).pack(side="right", pady=4)
         body = tk.Frame(page, bg=self.COLORS["bg"])
         body.pack(fill="both", expand=True)
         general = tk.Frame(body, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         general.pack(fill="x", pady=(0, 12))
-        tk.Label(general, text="运行策略", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).grid(row=0, column=0, columnspan=4, sticky="w", padx=14, pady=(12, 8))
-        fields = (
-            ("local_root", "本地归档目录"),
-            ("poll_minutes", "检查间隔（分钟）"),
-            ("history_days", "扫描历史（天）"),
-            ("download_workers", "下载并发"),
-            ("bandwidth_limit", "全局带宽限制"),
-            ("minimum_free_gib", "磁盘保留（GiB）"),
-            ("rclone_binary", "rclone 路径"),
-        )
-        for index, (key, label) in enumerate(fields):
-            row = 1 + index // 2
-            column = (index % 2) * 2
-            tk.Label(general, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=row, column=column, sticky="w", padx=(14, 6), pady=8)
-            variable = tk.StringVar()
-            self.setting_vars[key] = variable
-            entry = ttk.Entry(general, textvariable=variable, width=35)
-            entry.grid(row=row, column=column + 1, sticky="ew", padx=(0, 14), pady=8)
-            if key == "local_root":
-                entry.grid_configure(padx=(0, 48))
-                ttk.Button(general, text="…", width=3, command=self.choose_archive_root).grid(row=row, column=column + 1, sticky="e", padx=(0, 14), pady=8)
-        for column in (1, 3):
-            general.grid_columnconfigure(column, weight=1)
+        tk.Label(general, text="同步策略", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 8))
+        self.setting_vars["local_root"] = tk.StringVar()
+        tk.Label(general, text="本地归档目录", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", padx=(14, 6), pady=8)
+        root_entry = ttk.Entry(general, textvariable=self.setting_vars["local_root"])
+        root_entry.grid(row=1, column=1, sticky="ew", padx=(0, 48), pady=8)
+        ttk.Button(general, text="…", width=3, command=self.choose_archive_root).grid(row=1, column=1, sticky="e", padx=(0, 14), pady=8)
+        for key in ("poll_minutes", "history_days", "download_workers", "bandwidth_limit", "minimum_free_gib"):
+            self.setting_vars[key] = tk.StringVar()
         auto = tk.BooleanVar()
         self.setting_vars["auto_download"] = auto
-        ttk.Checkbutton(general, text="自动检查并下载", variable=auto).grid(row=5, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 14))
+        ttk.Checkbutton(general, text="打开客户端后自动检查并复制缺失归档", variable=auto).grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 4))
+        self.advanced_summary = tk.Label(general, text="", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
+        self.advanced_summary.grid(row=3, column=0, sticky="w", padx=14, pady=(2, 12))
+        ttk.Button(general, text="调整高级下载设置…", command=self.edit_advanced_settings).grid(row=3, column=1, sticky="e", padx=14, pady=(2, 12))
+        general.grid_columnconfigure(1, weight=1)
         profiles = tk.Frame(body, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         profiles.pack(fill="both", expand=True)
         profile_header = tk.Frame(profiles, bg=self.COLORS["surface"])
         profile_header.pack(fill="x", padx=12, pady=10)
-        tk.Label(profile_header, text="采集服务器", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).pack(side="left")
-        ttk.Button(profile_header, text="添加", command=lambda: self.edit_profile(None)).pack(side="right", padx=3)
-        ttk.Button(profile_header, text="编辑", command=self.edit_selected_profile).pack(side="right", padx=3)
-        ttk.Button(profile_header, text="删除", style="Danger.TButton", command=self.delete_selected_profile).pack(side="right", padx=3)
-        columns = ("collector", "source", "enabled")
+        tk.Label(profile_header, text="Ubuntu 连接", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).pack(side="left")
+        profile_actions = tk.Frame(profile_header, bg=self.COLORS["surface"])
+        profile_actions.pack(side="right")
+        ttk.Button(profile_actions, text="添加连接", command=lambda: self.edit_profile(None)).pack(side="left", padx=3)
+        ttk.Button(profile_actions, text="编辑", command=self.edit_selected_profile).pack(side="left", padx=3)
+        ttk.Button(profile_actions, text="删除", style="Danger.TButton", command=self.delete_selected_profile).pack(side="left", padx=3)
+        columns = ("collector", "endpoint", "enabled")
         self.profiles_tree = ttk.Treeview(profiles, columns=columns, show="tree headings", selectmode="browse")
         self.profiles_tree.heading("#0", text="名称 / 配置 ID")
         self.profiles_tree.heading("collector", text="Collector ID")
-        self.profiles_tree.heading("source", text="来源")
+        self.profiles_tree.heading("endpoint", text="Ubuntu 地址 / 用户")
         self.profiles_tree.heading("enabled", text="状态")
         self.profiles_tree.column("#0", width=260)
         self.profiles_tree.column("collector", width=220)
-        self.profiles_tree.column("source", width=180)
+        self.profiles_tree.column("endpoint", width=230)
         self.profiles_tree.column("enabled", width=100)
         self.profiles_tree.pack(fill="both", expand=True)
         self.profiles_tree.bind("<Double-1>", lambda _event: self.edit_selected_profile())
@@ -532,13 +581,13 @@ class ArchiveDesktopApp:
         bar.grid_propagate(False)
         self.transfer_title = tk.Label(bar, text="传输空闲", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 9))
         self.transfer_title.pack(side="left", padx=(14, 10))
-        self.transfer_detail = tk.Label(bar, text="等待自动检查", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8), width=34)
+        self.transfer_detail = tk.Label(bar, text="等待自动检查", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8), width=24)
         self.transfer_detail.pack(side="left")
-        self.transfer_progress = ttk.Progressbar(bar, orient="horizontal", mode="determinate", maximum=100, length=280)
+        self.transfer_progress = ttk.Progressbar(bar, orient="horizontal", mode="determinate", maximum=100, length=170)
         self.transfer_progress.pack(side="left", fill="x", expand=True, padx=12)
         self.transfer_stats = tk.Label(bar, text="速度 -- · 剩余 --", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
         self.transfer_stats.pack(side="left", padx=10)
-        ttk.Button(bar, text="任务", command=lambda: self.show_page("jobs")).pack(side="right", padx=(0, 12), pady=7)
+        ttk.Button(bar, text="查看任务", command=lambda: self.show_page("jobs")).pack(side="right", padx=(0, 12), pady=7)
 
     def show_page(self, key: str) -> None:
         self.active_page = key
@@ -551,8 +600,6 @@ class ArchiveDesktopApp:
             )
         if key == "jobs":
             self._render_jobs()
-        elif key == "status":
-            self._render_days()
         elif key == "settings":
             self._load_settings()
 
@@ -584,6 +631,8 @@ class ArchiveDesktopApp:
         self.profile_var.set(selected.display_name if selected else "")
         self.profile_combo.configure(state="readonly" if profiles else "disabled")
         self.refresh_button.configure(state="normal" if profiles else "disabled")
+        if hasattr(self, "sync_all_button"):
+            self.sync_all_button.configure(state="normal" if profiles else "disabled")
 
     def _selected_profile(self) -> ProfileConfig | None:
         name = self.profile_var.get()
@@ -732,7 +781,6 @@ class ArchiveDesktopApp:
         self.up_button.configure(state="normal" if state["archive_date"] else "disabled")
         self._render_directory_tree()
         self._render_current_list()
-        self._render_detail(None)
         self._update_download_action()
 
     def _render_directory_tree(self) -> None:
@@ -842,27 +890,29 @@ class ArchiveDesktopApp:
                 values = (
                     "归档日期",
                     bytes_text(item.get("bytes_total")),
-                    f"{int(item.get('row_count') or 0):,}",
                     STATUS_LABELS.get(str(item.get("status") or "unknown"), str(item.get("status") or "未知")),
                     "本地存在" if item.get("local") else "未下载",
                 )
             elif item_type == "directory":
-                values = ("文件夹", "--", "--", "--", f"{int(item.get('entry_count') or 0)} 个对象")
+                values = (
+                    f"文件夹 · {int(item.get('entry_count') or 0)} 个对象",
+                    "--",
+                    "--",
+                    "--",
+                )
             elif self.active_scope == "remote":
                 values = (
                     " · ".join(filter(None, (str(item.get("kind") or ""), str(item.get("table_name") or "")))) or "归档对象",
                     bytes_text(item.get("size_bytes")),
-                    f"{int(item.get('row_count') or 0):,}",
-                    {"present": "本地存在", "staged": "已暂存", "downloading": "下载中", "missing": "待下载", "mismatch": "大小异常"}.get(str(item.get("local_state") or ""), "未知"),
-                    str(item.get("sha256") or "")[:12],
+                    "已发布",
+                    {"present": "已验证", "staged": "已暂存", "downloading": "下载中", "missing": "待下载", "mismatch": "大小异常"}.get(str(item.get("local_state") or ""), "未知"),
                 )
             else:
                 values = (
                     "本地文件",
                     bytes_text(item.get("size_bytes")),
-                    "--",
-                    "下载中" if item.get("state") == "downloading" else "已验证目录" if item.get("location") == "verified" else "暂存目录",
-                    "已列入清单" if item.get("remote_state") == "listed" else "控制文件" if item.get("remote_state") == "control" else "仅本地",
+                    "已列入清单" if item.get("remote_state") == "listed" else "本地对象",
+                    "下载中" if item.get("state") == "downloading" else "已验证" if item.get("location") == "verified" else "暂存目录",
                 )
             icon = {"date": "▣", "directory": "▸"}.get(item_type, "▤")
             item_id = self.file_list.insert(
@@ -875,7 +925,11 @@ class ArchiveDesktopApp:
             text=f"{len(entries)} 项 · {bytes_text(result.get('bytes_total'))} · {int(result.get('row_count') or 0):,} 行{suffix}"
         )
         if not state["archive_date"]:
-            self.file_notice.configure(text=f"{len(state['dates'])} 个归档日期", fg=self.COLORS["muted"])
+            hint = " · 双击日期查看对象" if state["dates"] else ""
+            self.file_notice.configure(
+                text=f"{len(state['dates'])} 个归档日期{hint}",
+                fg=self.COLORS["muted"],
+            )
         else:
             detail = str(result.get("detail") or "")
             self.file_notice.configure(text=detail or "目录已读取", fg=self.COLORS["muted"])
@@ -889,36 +943,6 @@ class ArchiveDesktopApp:
             self.open_date(str(item.get("archive_date") or ""))
         elif item.get("type") == "directory":
             self._load_directory(str(item.get("path") or ""))
-
-    def _list_selected(self, _event: tk.Event[Any]) -> None:
-        selection = self.file_list.selection()
-        self._render_detail(self.list_entries.get(selection[0]) if selection else None)
-
-    def _render_detail(self, item: dict[str, Any] | None) -> None:
-        state = self.browser[self.active_scope]
-        result = state.get("result") or {}
-        if item is None:
-            values = {
-                "name": state["path"].split("/")[-1] if state["path"] else state["archive_date"] or "全部归档",
-                "type": "文件夹" if state["archive_date"] else "归档根目录",
-                "path": state["path"] or "归档根目录",
-                "size": bytes_text(result.get("bytes_total")),
-                "rows": f"{int(result.get('row_count') or 0):,}",
-                "status": STATUS_LABELS.get(str(result.get("state") or "unknown"), str(result.get("state") or "未知")),
-                "sha256": str(result.get("manifest_sha256") or "--"),
-            }
-        else:
-            values = {
-                "name": str(item.get("name") or "--"),
-                "type": "文件夹" if item.get("type") == "directory" else " · ".join(filter(None, (str(item.get("kind") or ""), str(item.get("table_name") or "")))) or "文件",
-                "path": str(item.get("path") or "--"),
-                "size": "--" if item.get("type") == "directory" else bytes_text(item.get("size_bytes")),
-                "rows": f"{int(item.get('row_count') or 0):,}" if item.get("row_count") is not None else "--",
-                "status": str(item.get("local_state") or item.get("state") or item.get("location") or "--"),
-                "sha256": str(item.get("sha256") or "--"),
-            }
-        for key, variable in self.detail_vars.items():
-            variable.set(values.get(key, "--"))
 
     def _update_download_action(self) -> None:
         state = self.browser[self.active_scope]
@@ -977,7 +1001,7 @@ class ArchiveDesktopApp:
         objects_done = int(progress.get("objects_done") or (active or {}).get("objects_done") or 0)
         percent = done / total * 100 if total else objects_done / objects * 100 if objects else 0
         if active:
-            label = {"scan": "检查网盘", "scan_download": "自动同步", "download": "指定日期下载", "verify": "重新校验"}.get(str(active.get("action") or ""), "后台任务")
+            label = {"scan": "检查 Ubuntu 归档", "scan_download": "同步缺失归档", "download": "指定日期下载", "verify": "重新校验"}.get(str(active.get("action") or ""), "后台任务")
             self.transfer_title.configure(text=label)
             self.transfer_detail.configure(text=str(progress.get("current_object") or active.get("detail") or "任务执行中"))
         else:
@@ -991,17 +1015,14 @@ class ArchiveDesktopApp:
         ratio = int(int(disk.get("used") or 0) / int(disk.get("total") or 1) * 100)
         self.sidebar_disk.configure(text=f"本地磁盘 {ratio}% · 可用 {bytes_text(disk.get('free'))}")
         self.sidebar_state.configure(text="任务执行中" if active else "客户端在线")
-        days = self.database.days(5000)
-        verified = sum(item.get("status") == "verified" for item in days)
-        failed = sum(item.get("status") in {"error", "remote_failed", "manifest_changed"} for item in days)
-        self.status_cards["runtime"].set("执行中" if active else "自动运行" if runtime.get("auto_download") else "空闲")
-        self.status_cards["verified"].set(str(verified))
-        self.status_cards["pending"].set(str(failed))
-        self.status_cards["disk"].set(f"{ratio}%")
+        if hasattr(self, "cancel_button"):
+            self.cancel_button.configure(state="normal" if active else "disabled")
+        if hasattr(self, "sync_all_button"):
+            self.sync_all_button.configure(
+                state="disabled" if active or not self._profile_choices() else "normal"
+            )
         if self.active_page == "jobs":
             self._render_jobs()
-        elif self.active_page == "status":
-            self._render_days()
         if self.active_page == "files":
             self._update_download_action()
         self.root.after(1000, self._refresh_runtime)
@@ -1012,7 +1033,7 @@ class ArchiveDesktopApp:
         self.jobs_tree.delete(*self.jobs_tree.get_children())
         profiles = {item.profile_id: item.display_name for item in self.store.load().profiles}
         for job in self.database.jobs(200):
-            action = {"scan": "检查网盘", "scan_download": "自动同步", "download": "指定日期下载", "verify": "重新校验"}.get(str(job.get("action") or ""), str(job.get("action") or "任务"))
+            action = {"scan": "检查 Ubuntu 归档", "scan_download": "同步缺失归档", "download": "指定日期下载", "verify": "重新校验"}.get(str(job.get("action") or ""), str(job.get("action") or "任务"))
             location = " · ".join(filter(None, (profiles.get(str(job.get("profile_id") or ""), str(job.get("profile_id") or "")), str(job.get("archive_date") or "")))) or "全部采集服务器"
             values = (
                 location,
@@ -1022,21 +1043,6 @@ class ArchiveDesktopApp:
                 str(job.get("updated_at") or ""),
             )
             self.jobs_tree.insert("", "end", text=action, values=values)
-
-    def _render_days(self) -> None:
-        if not hasattr(self, "days_tree"):
-            return
-        self.days_tree.delete(*self.days_tree.get_children())
-        profiles = {item.profile_id: item.display_name for item in self.store.load().profiles}
-        for item in self.database.days(1000):
-            values = (
-                profiles.get(str(item.get("profile_id") or ""), str(item.get("profile_id") or "")),
-                STATUS_LABELS.get(str(item.get("status") or "unknown"), str(item.get("status") or "未知")),
-                f"{int(item.get('objects_done') or 0)}/{int(item.get('object_count') or 0)}",
-                f"{bytes_text(item.get('bytes_done'))} / {bytes_text(item.get('bytes_total'))}",
-                str(item.get("updated_at") or ""),
-            )
-            self.days_tree.insert("", "end", text=str(item.get("archive_date") or ""), values=values)
 
     def _load_settings(self) -> None:
         if not self.setting_vars:
@@ -1049,13 +1055,26 @@ class ArchiveDesktopApp:
             "download_workers": str(config.download_workers),
             "bandwidth_limit": config.bandwidth_limit,
             "minimum_free_gib": str(max(1, config.minimum_free_bytes // 1024**3)),
-            "rclone_binary": config.rclone_binary,
             "auto_download": config.auto_download,
         }
         for key, value in values.items():
-            self.setting_vars[key].set(value)
+            if key in self.setting_vars:
+                self.setting_vars[key].set(value)
         self.profile_drafts = list(config.profiles)
         self._render_profile_drafts()
+        self._update_advanced_summary()
+
+    def _update_advanced_summary(self) -> None:
+        if not hasattr(self, "advanced_summary"):
+            return
+        self.advanced_summary.configure(
+            text=(
+                f"高级设置：每 {self.setting_vars['poll_minutes'].get()} 分钟检查 · "
+                f"并发 {self.setting_vars['download_workers'].get()} · "
+                f"带宽 {self.setting_vars['bandwidth_limit'].get()} · "
+                f"保留空间 {self.setting_vars['minimum_free_gib'].get()} GiB"
+            )
+        )
 
     def _render_profile_drafts(self) -> None:
         if not hasattr(self, "profiles_tree"):
@@ -1067,13 +1086,71 @@ class ArchiveDesktopApp:
                 "end",
                 iid=str(index),
                 text=f"{profile.display_name} · {profile.profile_id}",
-                values=(profile.collector_id, SOURCE_LABELS.get(profile.source_type, profile.source_type), "已启用" if profile.enabled else "已停用"),
+                values=(
+                    profile.collector_id,
+                    f"{profile.sftp_user}@{profile.sftp_host}:{profile.sftp_port}",
+                    "已启用" if profile.enabled else "已停用",
+                ),
             )
 
     def choose_archive_root(self) -> None:
         selected = filedialog.askdirectory(parent=self.root, initialdir=self.setting_vars["local_root"].get() or str(Path.home()))
         if selected:
             self.setting_vars["local_root"].set(selected)
+
+    def edit_advanced_settings(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("高级下载设置")
+        dialog.geometry("460x360")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        container = tk.Frame(dialog, bg=self.COLORS["surface"], padx=18, pady=16)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+        fields = (
+            ("poll_minutes", "自动检查间隔（分钟）"),
+            ("history_days", "扫描历史范围（天）"),
+            ("download_workers", "下载并发"),
+            ("bandwidth_limit", "带宽限制"),
+            ("minimum_free_gib", "最低可用空间（GiB）"),
+        )
+        variables: dict[str, tk.StringVar] = {}
+        for row, (key, label) in enumerate(fields):
+            tk.Label(container, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", pady=7)
+            variable = tk.StringVar(value=str(self.setting_vars[key].get()))
+            variables[key] = variable
+            ttk.Entry(container, textvariable=variable, width=24).grid(row=row, column=1, sticky="ew", pady=7)
+        error = tk.StringVar()
+        tk.Label(container, textvariable=error, bg=self.COLORS["surface"], fg=self.COLORS["bad"], wraplength=400, justify="left").grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(4, 8))
+        buttons = tk.Frame(container, bg=self.COLORS["surface"])
+        buttons.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="e")
+
+        def apply() -> None:
+            try:
+                poll = int(variables["poll_minutes"].get())
+                history = int(variables["history_days"].get())
+                workers = int(variables["download_workers"].get())
+                minimum = float(variables["minimum_free_gib"].get())
+                if not 1 <= poll <= 1440:
+                    raise ValueError("自动检查间隔必须为 1 至 1440 分钟")
+                if not 1 <= history <= 3650:
+                    raise ValueError("扫描历史范围必须为 1 至 3650 天")
+                if not 1 <= workers <= 16:
+                    raise ValueError("下载并发必须为 1 至 16")
+                if minimum < 1:
+                    raise ValueError("最低可用空间必须至少为 1 GiB")
+                if not variables["bandwidth_limit"].get().strip():
+                    raise ValueError("带宽限制不能为空")
+                for key, variable in variables.items():
+                    self.setting_vars[key].set(variable.get().strip())
+                self._update_advanced_summary()
+                dialog.destroy()
+            except (TypeError, ValueError) as exc:
+                error.set(str(exc))
+
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="right", padx=4)
+        ttk.Button(buttons, text="确定", style="Primary.TButton", command=apply).pack(side="right", padx=4)
+        container.grid_columnconfigure(1, weight=1)
 
     def edit_selected_profile(self) -> None:
         selection = self.profiles_tree.selection()
@@ -1105,8 +1182,8 @@ class ArchiveDesktopApp:
         dialog = tk.Toplevel(self.root)
         self.profile_dialog = dialog
         dialog.title("编辑采集服务器" if index is not None else "添加采集服务器")
-        dialog.geometry("680x650")
-        dialog.minsize(620, 560)
+        dialog.geometry("620x560")
+        dialog.minsize(580, 520)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(bg=self.COLORS["bg"])
@@ -1115,28 +1192,24 @@ class ArchiveDesktopApp:
         values = asdict(profile)
         variables: dict[str, tk.Variable] = {}
         fields = (
-            ("profile_id", "配置 ID"), ("display_name", "显示名称"), ("collector_id", "Collector ID"),
-            ("drive_remote", "rclone remote"), ("drive_prefix", "Google Drive 前缀"),
-            ("sftp_host", "Ubuntu 主机"), ("sftp_port", "SSH 端口"), ("sftp_user", "只读用户"),
-            ("sftp_key_file", "SSH 私钥文件"), ("sftp_known_hosts_file", "known_hosts 文件"),
-            ("sftp_root", "SFTP 根目录"), ("verified_source_root", "已验证目录来源"),
+            ("display_name", "显示名称"),
+            ("collector_id", "Collector ID"),
+            ("sftp_host", "Ubuntu 主机"),
+            ("sftp_port", "SSH 端口"),
+            ("sftp_user", "只读用户"),
+            ("sftp_key_file", "SSH 私钥文件"),
+            ("sftp_known_hosts_file", "known_hosts 文件"),
+            ("sftp_root", "归档根目录"),
         )
-        source_var = tk.StringVar(value=SOURCE_LABELS.get(profile.source_type, "Google Drive"))
-        variables["source_type"] = source_var
         row = 0
-        for key, label in fields[:3]:
+        for key, label in fields[:2]:
             tk.Label(container, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=row, column=0, sticky="w", pady=5)
             variable = tk.StringVar(value=str(values.get(key) or ""))
             variables[key] = variable
             ttk.Entry(container, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=5)
             row += 1
-        tk.Label(container, text="来源", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=row, column=0, sticky="w", pady=5)
-        source_combo = ttk.Combobox(container, textvariable=source_var, values=list(SOURCE_VALUES), state="readonly")
-        source_combo.grid(row=row, column=1, sticky="ew", pady=5)
-        row += 1
-        field_rows: dict[str, tuple[tk.Widget, tk.Widget]] = {}
-        browse_fields = {"sftp_key_file": "file", "sftp_known_hosts_file": "file", "verified_source_root": "directory"}
-        for key, label in fields[3:]:
+        browse_fields = {"sftp_key_file", "sftp_known_hosts_file"}
+        for key, label in fields[2:]:
             label_widget = tk.Label(container, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
             label_widget.grid(row=row, column=0, sticky="w", pady=5)
             variable = tk.StringVar(value=str(values.get(key) or ""))
@@ -1146,12 +1219,11 @@ class ArchiveDesktopApp:
             field.grid_columnconfigure(0, weight=1)
             ttk.Entry(field, textvariable=variable).grid(row=0, column=0, sticky="ew")
             if key in browse_fields:
-                def browse(target=variable, mode=browse_fields[key]) -> None:
-                    selected = filedialog.askdirectory(parent=dialog) if mode == "directory" else filedialog.askopenfilename(parent=dialog)
+                def browse(target=variable) -> None:
+                    selected = filedialog.askopenfilename(parent=dialog)
                     if selected:
                         target.set(selected)
                 ttk.Button(field, text="…", width=3, command=browse).grid(row=0, column=1, padx=(5, 0))
-            field_rows[key] = (label_widget, field)
             row += 1
         enabled = tk.BooleanVar(value=profile.enabled)
         variables["enabled"] = enabled
@@ -1164,27 +1236,14 @@ class ArchiveDesktopApp:
         buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="right", padx=4)
 
-        def update_fields(*_args: Any) -> None:
-            source = SOURCE_VALUES.get(source_var.get(), "google_drive")
-            groups = {
-                "google_drive": {"drive_remote", "drive_prefix"},
-                "ubuntu_sftp": {"sftp_host", "sftp_port", "sftp_user", "sftp_key_file", "sftp_known_hosts_file", "sftp_root"},
-                "verified_directory": {"verified_source_root"},
-            }
-            visible = groups[source]
-            for key, (label_widget, field) in field_rows.items():
-                if key in visible:
-                    label_widget.grid()
-                    field.grid()
-                else:
-                    label_widget.grid_remove()
-                    field.grid_remove()
-
         def save_profile() -> None:
             try:
                 candidate = ProfileConfig.from_mapping({
                     key: variable.get() for key, variable in variables.items()
-                } | {"source_type": SOURCE_VALUES.get(source_var.get(), "google_drive")})
+                } | {
+                    "profile_id": variables["collector_id"].get(),
+                    "source_type": "ubuntu_sftp",
+                })
                 errors = candidate.validate()
                 if errors:
                     raise ValueError("；".join(errors))
@@ -1198,8 +1257,6 @@ class ArchiveDesktopApp:
                 error_var.set(str(exc))
 
         ttk.Button(buttons, text="确定", style="Primary.TButton", command=save_profile).pack(side="right", padx=4)
-        source_var.trace_add("write", update_fields)
-        update_fields()
         container.grid_columnconfigure(1, weight=1)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.bind("<Destroy>", lambda _event: setattr(self, "profile_dialog", None))
@@ -1210,7 +1267,7 @@ class ArchiveDesktopApp:
             config = ClientConfig(
                 config_version=CONFIG_VERSION,
                 local_root=str(self.setting_vars["local_root"].get()).strip(),
-                rclone_binary=str(self.setting_vars["rclone_binary"].get()).strip(),
+                rclone_binary=current.rclone_binary,
                 poll_minutes=int(str(self.setting_vars["poll_minutes"].get())),
                 history_days=int(str(self.setting_vars["history_days"].get())),
                 download_workers=int(str(self.setting_vars["download_workers"].get())),
@@ -1227,6 +1284,7 @@ class ArchiveDesktopApp:
             self.service.wake()
             self.browser = {"remote": self._new_browser_state(), "local": self._new_browser_state()}
             self._refresh_profile_choices()
+            self._update_advanced_summary()
             messagebox.showinfo("设置", "设置已保存。", parent=self.root)
         except (ValueError, TypeError) as exc:
             messagebox.showerror("设置无效", str(exc), parent=self.root)
@@ -1237,12 +1295,6 @@ class ArchiveDesktopApp:
         self.file_list.delete(*self.file_list.get_children())
         self.file_summary.configure(text=message)
         self.download_button.configure(state="disabled")
-
-    def open_state_directory(self) -> None:
-        if os.name == "nt":
-            os.startfile(self.store.root)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(self.store.root)])
 
     def close(self) -> None:
         if self.closing:
@@ -1278,7 +1330,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SMSI Windows 原生归档备份客户端")
     parser.add_argument("--check", action="store_true", help="只检查桌面客户端运行环境")
     arguments = parser.parse_args()
-    store = ConfigStore()
+    store = DesktopConfigStore()
     if arguments.check:
         result = preflight(store)
         print("desktop_ready " + " ".join(f"{key}={value}" for key, value in result.items()))
@@ -1294,6 +1346,18 @@ def main() -> None:
     try:
         ArchiveDesktopApp(root, store)
         root.mainloop()
+    except Exception:
+        error_path = store.root / "desktop-error.log"
+        error_path.write_text(traceback.format_exc(), encoding="utf-8")
+        try:
+            messagebox.showerror(
+                "SMSI 归档备份",
+                f"桌面客户端启动失败，详细信息已写入：\n{error_path}",
+                parent=root,
+            )
+        except tk.TclError:
+            pass
+        raise
     finally:
         lock.release()
 
