@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from threading import Event
 from typing import Callable
 
-from .config import ClientConfig, ProfileConfig
+from .config import ClientConfig, IDENTITY_RE, ProfileConfig
 from .verifier import OperationCancelled
 
 
@@ -275,6 +275,24 @@ class RcloneSftpSource(RcloneSource):
 
     def _source_root(self) -> str:
         return f":sftp:{self.profile.sftp_archive_root}"
+
+    def _sftp_base_root(self) -> str:
+        return f":sftp:{self.profile.sftp_root.rstrip('/')}"
+
+    def list_collectors(self) -> set[str]:
+        result = self._run(
+            ["lsf", self._sftp_base_root(), "--dirs-only", "--max-depth", "1"],
+            timeout=90,
+        )
+        collectors: set[str] = set()
+        for line in result.stdout.splitlines():
+            name = line.strip().rstrip("/")
+            if not name.startswith("collector="):
+                continue
+            collector_id = name.removeprefix("collector=")
+            if IDENTITY_RE.fullmatch(collector_id):
+                collectors.add(collector_id)
+        return collectors
 
     def _backend_flags(self) -> list[str]:
         return [

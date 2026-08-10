@@ -45,6 +45,16 @@ def test_build_source_selects_sftp(_resolve) -> None:
     assert isinstance(source, RcloneSftpSource)
 
 
+@patch("archive_backup.sources.resolve_rclone_binary", return_value="rclone")
+def test_sftp_source_lists_all_collectors_from_archive_root(_resolve) -> None:
+    source = RcloneSftpSource(ClientConfig(), make_sftp_profile())
+    with patch.object(source, "_run") as run:
+        run.return_value.stdout = "collector=tencent-report/\ncollector=tencent-paper/\nnotes/\ncollector=bad id/\n"
+
+        assert source.list_collectors() == {"tencent-paper", "tencent-report"}
+        assert run.call_args.args[0][:4] == ["lsf", ":sftp:/archive", "--dirs-only", "--max-depth"]
+
+
 def test_global_bandwidth_limit_is_split_across_workers() -> None:
     assert split_bandwidth_limit("20M", 2) == "10000000B"
     assert split_bandwidth_limit("off", 4) == "off"

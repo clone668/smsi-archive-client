@@ -84,6 +84,7 @@ class ProfileConfig:
     sftp_key_file: str = ""
     sftp_known_hosts_file: str = ""
     sftp_root: str = "/archive"
+    sftp_auto_discover: bool = False
 
     @property
     def drive_root(self) -> str:
@@ -149,6 +150,7 @@ class ProfileConfig:
             sftp_key_file=str(value.get("sftp_key_file") or "").strip(),
             sftp_known_hosts_file=str(value.get("sftp_known_hosts_file") or "").strip(),
             sftp_root="/" + str(value.get("sftp_root") or "/archive").strip("/"),
+            sftp_auto_discover=bool(value.get("sftp_auto_discover", False)),
         )
 
 

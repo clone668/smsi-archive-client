@@ -27,6 +27,18 @@ set "PYTHON_ARGS="
 :python_ready
 "%PYTHON_EXE%" %PYTHON_ARGS% --version >>"%LOG_FILE%" 2>&1
 
+where rclone >nul 2>nul
+if not errorlevel 1 goto :rclone_ready
+echo rclone is required for Ubuntu SFTP access. Attempting installation...
+where winget >nul 2>nul
+if errorlevel 1 goto :rclone_missing
+winget install --id Rclone.Rclone -e --accept-package-agreements --accept-source-agreements >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :failed
+where rclone >nul 2>nul
+if errorlevel 1 goto :rclone_missing
+
+:rclone_ready
+
 if exist ".venv\Scripts\python.exe" goto :venv_ready
 echo Creating the Python environment...
 "%PYTHON_EXE%" %PYTHON_ARGS% -m venv .venv >>"%LOG_FILE%" 2>&1
@@ -61,6 +73,11 @@ exit /b 0
 :python_missing
 echo Python 3.10 or newer is required. Install Python with PATH or Python Launcher enabled.
 >>"%LOG_FILE%" echo Python 3.10 or newer was not found
+goto :failed
+
+:rclone_missing
+echo rclone is required for Ubuntu SFTP access. Install it from https://rclone.org/install/ and run this file again.
+>>"%LOG_FILE%" echo rclone was not found
 goto :failed
 
 :failed

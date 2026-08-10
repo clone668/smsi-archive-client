@@ -52,7 +52,7 @@ def test_cached_directory_navigation_keeps_one_level_only() -> None:
 def test_desktop_preflight_does_not_create_a_window(tmp_path) -> None:
     result = preflight(ConfigStore(tmp_path / "state"))
 
-    assert result["version"] == "3.2.0"
+    assert result["version"] == "3.3.0"
     assert result["profiles"] == 0
     assert result["tk"]
     assert (tmp_path / "state" / "config.json").exists()
@@ -86,7 +86,9 @@ def test_windows_store_exposes_only_ubuntu_profiles(tmp_path) -> None:
 
     config = DesktopConfigStore(root).load()
 
-    assert [profile.profile_id for profile in config.profiles] == ["ubuntu-copy"]
+    assert [profile.profile_id for profile in config.profiles] == ["ubuntu"]
+    assert config.profiles[0].collector_id == "all"
+    assert config.profiles[0].sftp_auto_discover is True
 
 
 def test_windows_store_drops_non_ubuntu_profiles_on_save(tmp_path) -> None:
@@ -106,3 +108,48 @@ def test_windows_store_drops_non_ubuntu_profiles_on_save(tmp_path) -> None:
     store.save(config)
 
     assert store.load().profiles == []
+
+
+def test_windows_store_discovers_collectors_without_saving_profiles(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "state"
+    profile = ProfileConfig(
+        profile_id="ubuntu",
+        display_name="Ubuntu 归档",
+        collector_id="all",
+        source_type="ubuntu_sftp",
+        sftp_host="192.168.2.240",
+        sftp_key_file="client.key",
+        sftp_known_hosts_file="known_hosts",
+        sftp_auto_discover=True,
+    )
+    store = DesktopConfigStore(root)
+    store.save(ClientConfig(local_root=str(tmp_path / "archives"), profiles=[profile]))
+    monkeypatch.setattr("archive_backup.desktop.RcloneSftpSource.list_collectors", lambda _source: {"tencent-paper", "tencent-report"})
+
+    runtime = store.runtime_config(store.load())
+
+    assert [item.collector_id for item in runtime.profiles] == ["tencent-paper", "tencent-report"]
+    assert [item.profile_id for item in store.load().profiles] == ["ubuntu"]
+
+
+def test_windows_store_discovers_local_collectors(tmp_path) -> None:
+    root = tmp_path / "state"
+    archive_root = tmp_path / "archives"
+    (archive_root / "collector=tencent-paper").mkdir(parents=True)
+    (archive_root / "collector=tencent-report").mkdir(parents=True)
+    profile = ProfileConfig(
+        profile_id="ubuntu",
+        display_name="Ubuntu 归档",
+        collector_id="all",
+        source_type="ubuntu_sftp",
+        sftp_host="192.168.2.240",
+        sftp_key_file="client.key",
+        sftp_known_hosts_file="known_hosts",
+        sftp_auto_discover=True,
+    )
+    store = DesktopConfigStore(root)
+    config = ClientConfig(local_root=str(archive_root), profiles=[profile])
+
+    local = store.local_profiles(config)
+
+    assert [item.collector_id for item in local] == ["tencent-paper", "tencent-report"]

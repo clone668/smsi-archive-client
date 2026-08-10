@@ -5,7 +5,7 @@ import os
 import queue
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,10 +13,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .config import CONFIG_VERSION, ClientConfig, ConfigStore, ProfileConfig
+from .config import CONFIG_VERSION, IDENTITY_RE, ClientConfig, ConfigStore, ProfileConfig
 from .database import StateDatabase
 from .manager import ArchiveManager
 from .service import ArchiveService
+from .sources import RcloneSftpSource
 
 
 ACTIVE_JOB_STATES = {"queued", "running", "cancelling"}
@@ -170,32 +171,91 @@ class DesktopConfigStore(ConfigStore):
 
     def load(self) -> ClientConfig:
         config = super().load()
-        config.profiles = [
-            profile for profile in config.profiles if profile.source_type == "ubuntu_sftp"
-        ]
+        config.profiles = self._normalize_profiles(config.profiles)
         return config
 
     def save(self, config: ClientConfig) -> None:
-        config.profiles = [
-            profile for profile in config.profiles if profile.source_type == "ubuntu_sftp"
-        ]
+        config.profiles = self._normalize_profiles(config.profiles)
         super().save(config)
+
+    @staticmethod
+    def _normalize_profiles(profiles: list[ProfileConfig]) -> list[ProfileConfig]:
+        connection = next(
+            (profile for profile in profiles if profile.source_type == "ubuntu_sftp"),
+            None,
+        )
+        if connection is None:
+            return []
+        return [
+            replace(
+                connection,
+                profile_id="ubuntu",
+                display_name="Ubuntu 归档",
+                collector_id="all",
+                sftp_auto_discover=True,
+            )
+        ]
+
+    def runtime_config(self, config: ClientConfig) -> ClientConfig:
+        connection = next(
+            (profile for profile in config.profiles if profile.sftp_auto_discover),
+            None,
+        )
+        if connection is None:
+            return replace(config, profiles=[])
+        source = RcloneSftpSource(config, connection)
+        profiles = [
+            replace(
+                connection,
+                profile_id=collector_id,
+                display_name=collector_id,
+                collector_id=collector_id,
+                sftp_auto_discover=False,
+            )
+            for collector_id in sorted(source.list_collectors())
+        ]
+        return replace(config, profiles=profiles)
+
+    def local_profiles(self, config: ClientConfig) -> list[ProfileConfig]:
+        connection = next(
+            (profile for profile in config.profiles if profile.sftp_auto_discover),
+            None,
+        )
+        if connection is None:
+            return []
+        profiles: list[ProfileConfig] = []
+        for path in sorted(config.archive_root.glob("collector=*")):
+            if not path.is_dir():
+                continue
+            collector_id = path.name.removeprefix("collector=")
+            if not IDENTITY_RE.fullmatch(collector_id):
+                continue
+            profiles.append(
+                replace(
+                    connection,
+                    profile_id=collector_id,
+                    display_name=collector_id,
+                    collector_id=collector_id,
+                    sftp_auto_discover=False,
+                )
+            )
+        return profiles
 
 
 class ArchiveDesktopApp:
     COLORS = {
-        "bg": "#f3f5f7",
+        "bg": "#f5f5f5",
         "surface": "#ffffff",
-        "surface2": "#f7f9fa",
-        "line": "#dce2e6",
-        "text": "#182126",
-        "muted": "#68767e",
-        "brand": "#126a63",
-        "brand_dark": "#0b554f",
-        "brand_soft": "#e3f2ef",
-        "sidebar": "#1b2422",
-        "sidebar_text": "#e9efed",
-        "sidebar_muted": "#93a19e",
+        "surface2": "#fafafa",
+        "line": "#e5e5e5",
+        "text": "#1f1f1f",
+        "muted": "#686868",
+        "brand": "#0f766e",
+        "brand_dark": "#0b5f59",
+        "brand_soft": "#dff3ef",
+        "sidebar": "#f8f8f8",
+        "sidebar_text": "#202020",
+        "sidebar_muted": "#666666",
         "warn": "#9a6500",
         "bad": "#b52e38",
     }
@@ -221,8 +281,11 @@ class ArchiveDesktopApp:
         }
         self.tree_actions: dict[str, tuple[str, str]] = {}
         self.list_entries: dict[str, dict[str, Any]] = {}
-        self.profile_dialog: tk.Toplevel | None = None
-        self.profile_drafts: list[ProfileConfig] = []
+        self.remote_profiles: list[ProfileConfig] = []
+        self.local_profiles_cache: list[ProfileConfig] = []
+        self.selected_profile_ids = {"remote": "", "local": ""}
+        self.collector_buttons: dict[str, tk.Button] = {}
+        self.ubuntu_connection_vars: dict[str, tk.Variable] = {}
         self.nav_buttons: dict[str, tk.Button] = {}
         self.pages: dict[str, tk.Frame] = {}
         self.setting_vars: dict[str, tk.Variable] = {}
@@ -235,7 +298,7 @@ class ArchiveDesktopApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self._drain_results)
         self.root.after(250, self._refresh_runtime)
-        self.root.after(350, lambda: self.refresh_dates(force=True))
+        self.root.after(350, self._discover_collectors)
 
     @staticmethod
     def _new_browser_state() -> dict[str, Any]:
@@ -334,7 +397,7 @@ class ArchiveDesktopApp:
         tk.Label(name, text="SMSI", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_text"], font=("Segoe UI Semibold", 11)).pack(anchor="w")
         tk.Label(name, text=f"归档备份 · {__version__}", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_muted"], font=("Segoe UI", 8)).pack(anchor="w")
         tk.Label(parent, text="工作区", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_muted"], font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=18, pady=(0, 5))
-        for key, label in (("files", "归档同步"), ("jobs", "任务记录"), ("settings", "设置")):
+        for key, label in (("files", "归档同步"), ("local", "本地文件"), ("jobs", "任务记录"), ("settings", "设置")):
             button = tk.Button(
                 parent,
                 text=label,
@@ -345,7 +408,7 @@ class ArchiveDesktopApp:
                 pady=11,
                 bg=self.COLORS["sidebar"],
                 fg=self.COLORS["sidebar_muted"],
-                activebackground="#26312f",
+                activebackground=self.COLORS["brand_soft"],
                 activeforeground=self.COLORS["sidebar_text"],
                 font=("Segoe UI Semibold", 10),
                 command=lambda page=key: self.show_page(page),
@@ -356,7 +419,7 @@ class ArchiveDesktopApp:
         footer.pack(side="bottom", fill="x", padx=18, pady=16)
         self.sidebar_disk = tk.Label(footer, text="本地磁盘 --", bg=self.COLORS["sidebar"], fg=self.COLORS["sidebar_muted"], font=("Segoe UI", 8))
         self.sidebar_disk.pack(anchor="w")
-        self.sidebar_state = tk.Label(footer, text="正在启动", bg=self.COLORS["sidebar"], fg="#76cdb0", font=("Segoe UI", 9))
+        self.sidebar_state = tk.Label(footer, text="正在启动", bg=self.COLORS["sidebar"], fg=self.COLORS["brand_dark"], font=("Segoe UI", 9))
         self.sidebar_state.pack(anchor="w", pady=(8, 0))
 
     def _new_page(self, key: str) -> tk.Frame:
@@ -377,67 +440,41 @@ class ArchiveDesktopApp:
 
     def _build_files_page(self) -> None:
         page = self._new_page("files")
-        header = self._page_header(
-            page,
-            "归档同步",
-            "从 Ubuntu 复制已完成的归档，并在本地自动完成完整校验",
-        )
+        header = tk.Frame(page, bg=self.COLORS["bg"])
+        header.pack(fill="x", pady=(0, 12))
+        title_box = tk.Frame(header, bg=self.COLORS["bg"])
+        title_box.pack(side="left")
+        self.files_title_label = ttk.Label(title_box, text="归档同步", style="Title.TLabel")
+        self.files_title_label.pack(anchor="w")
+        self.files_subtitle_label = tk.Label(title_box, text="Ubuntu 归档目录", bg=self.COLORS["bg"], fg=self.COLORS["muted"], font=("Segoe UI", 9))
+        self.files_subtitle_label.pack(anchor="w", pady=(2, 0))
         header_actions = tk.Frame(header, bg=self.COLORS["bg"])
         header_actions.pack(side="right", pady=3)
-        tk.Label(
-            header_actions,
-            text="采集服务器",
-            bg=self.COLORS["bg"],
-            fg=self.COLORS["muted"],
-            font=("Segoe UI", 8),
-        ).pack(side="left", padx=(0, 6))
-        self.profile_var = tk.StringVar()
-        self.profile_combo = ttk.Combobox(
-            header_actions,
-            textvariable=self.profile_var,
-            state="readonly",
-            width=18,
-        )
-        self.profile_combo.pack(side="left", padx=(0, 8))
-        self.profile_combo.bind(
-            "<<ComboboxSelected>>", lambda _event: self._profile_changed()
-        )
-        self.sync_all_button = ttk.Button(
-            header_actions,
-            text="同步缺失归档",
-            style="Primary.TButton",
-            command=lambda: self.request_scan(True),
-        )
+        self.refresh_collectors_button = ttk.Button(header_actions, text="刷新", command=self.refresh_source)
+        self.refresh_collectors_button.pack(side="left", padx=(0, 8))
+        self.sync_all_button = ttk.Button(header_actions, text="同步缺失归档", style="Primary.TButton", command=lambda: self.request_scan(True))
         self.sync_all_button.pack(side="left")
+
+        connection = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
+        connection.pack(fill="x", pady=(0, 10))
+        connection.grid_columnconfigure(1, weight=1)
+        self.connection_title_label = tk.Label(connection, text="Ubuntu 归档源", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10))
+        self.connection_title_label.grid(row=0, column=0, sticky="w", padx=(14, 8), pady=(11, 3))
+        self.connection_status_label = tk.Label(connection, text="正在连接…", bg=self.COLORS["surface"], fg=self.COLORS["warn"], font=("Segoe UI Semibold", 9))
+        self.connection_status_label.grid(row=0, column=1, sticky="w", pady=(11, 3))
+        self.collector_status_label = tk.Label(connection, text="归档目录自动发现中", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
+        self.collector_status_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 11))
+        self.collector_strip = tk.Frame(connection, bg=self.COLORS["surface"])
+        self.collector_strip.grid(row=0, column=2, rowspan=2, sticky="e", padx=14, pady=8)
+
         browser = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         browser.pack(fill="both", expand=True)
         toolbar = tk.Frame(browser, bg=self.COLORS["surface2"], height=54)
         toolbar.pack(fill="x")
         toolbar.pack_propagate(False)
-        scope_box = tk.Frame(toolbar, bg=self.COLORS["surface2"])
-        scope_box.pack(side="left", padx=(10, 8), pady=9)
         self.scope_buttons: dict[str, tk.Button] = {}
-        for scope, label in (("remote", "Ubuntu"), ("local", "本地副本")):
-            button = tk.Button(
-                scope_box,
-                text=label,
-                bd=1,
-                relief="solid",
-                padx=10,
-                pady=5,
-                font=("Segoe UI Semibold", 9),
-                command=lambda value=scope: self.set_scope(value),
-            )
-            button.pack(side="left")
-            self.scope_buttons[scope] = button
-        self.scope_buttons["remote"].configure(
-            bg=self.COLORS["brand"], fg="#ffffff"
-        )
-        self.scope_buttons["local"].configure(
-            bg=self.COLORS["surface"], fg=self.COLORS["muted"]
-        )
         self.up_button = ttk.Button(toolbar, text="↑", width=3, command=self.go_up)
-        self.up_button.pack(side="left", padx=(0, 4), pady=9)
+        self.up_button.pack(side="left", padx=(10, 4), pady=9)
         self.refresh_button = ttk.Button(
             toolbar, text="↻", width=3, command=lambda: self.refresh_dates(force=True)
         )
@@ -462,7 +499,7 @@ class ArchiveDesktopApp:
             command=self.download_selected_date,
         )
         self.download_button.pack(side="left", padx=(0, 10), pady=9)
-        self.file_notice = tk.Label(browser, text="选择采集服务器后读取归档日期", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], padx=12, pady=7, font=("Segoe UI", 9))
+        self.file_notice = tk.Label(browser, text="等待 Ubuntu 连接和归档目录", anchor="w", bg=self.COLORS["surface"], fg=self.COLORS["muted"], padx=12, pady=7, font=("Segoe UI", 9))
         self.file_notice.pack(fill="x")
         panes = ttk.Panedwindow(browser, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -531,7 +568,7 @@ class ArchiveDesktopApp:
 
     def _build_settings_page(self) -> None:
         page = self._new_page("settings")
-        header = self._page_header(page, "设置", "本地副本位置和 Ubuntu 连接")
+        header = self._page_header(page, "设置", "本地存储与 Ubuntu 只读 SFTP")
         ttk.Button(header, text="保存设置", style="Primary.TButton", command=self.save_settings).pack(side="right", pady=4)
         body = tk.Frame(page, bg=self.COLORS["bg"])
         body.pack(fill="both", expand=True)
@@ -552,28 +589,32 @@ class ArchiveDesktopApp:
         self.advanced_summary.grid(row=3, column=0, sticky="w", padx=14, pady=(2, 12))
         ttk.Button(general, text="调整高级下载设置…", command=self.edit_advanced_settings).grid(row=3, column=1, sticky="e", padx=14, pady=(2, 12))
         general.grid_columnconfigure(1, weight=1)
-        profiles = tk.Frame(body, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
-        profiles.pack(fill="both", expand=True)
-        profile_header = tk.Frame(profiles, bg=self.COLORS["surface"])
-        profile_header.pack(fill="x", padx=12, pady=10)
-        tk.Label(profile_header, text="Ubuntu 连接", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).pack(side="left")
-        profile_actions = tk.Frame(profile_header, bg=self.COLORS["surface"])
-        profile_actions.pack(side="right")
-        ttk.Button(profile_actions, text="添加连接", command=lambda: self.edit_profile(None)).pack(side="left", padx=3)
-        ttk.Button(profile_actions, text="编辑", command=self.edit_selected_profile).pack(side="left", padx=3)
-        ttk.Button(profile_actions, text="删除", style="Danger.TButton", command=self.delete_selected_profile).pack(side="left", padx=3)
-        columns = ("collector", "endpoint", "enabled")
-        self.profiles_tree = ttk.Treeview(profiles, columns=columns, show="tree headings", selectmode="browse")
-        self.profiles_tree.heading("#0", text="名称 / 配置 ID")
-        self.profiles_tree.heading("collector", text="Collector ID")
-        self.profiles_tree.heading("endpoint", text="Ubuntu 地址 / 用户")
-        self.profiles_tree.heading("enabled", text="状态")
-        self.profiles_tree.column("#0", width=260)
-        self.profiles_tree.column("collector", width=220)
-        self.profiles_tree.column("endpoint", width=230)
-        self.profiles_tree.column("enabled", width=100)
-        self.profiles_tree.pack(fill="both", expand=True)
-        self.profiles_tree.bind("<Double-1>", lambda _event: self.edit_selected_profile())
+        connection = tk.Frame(body, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
+        connection.pack(fill="x", pady=(0, 12))
+        tk.Label(connection, text="Ubuntu 连接", bg=self.COLORS["surface"], fg=self.COLORS["text"], font=("Segoe UI Semibold", 10)).grid(row=0, column=0, columnspan=3, sticky="w", padx=14, pady=(12, 2))
+        tk.Label(connection, text="/archive 对应 Ubuntu 的 /data/smsi-archive", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 10))
+        fields = (
+            ("sftp_host", "Ubuntu 主机", "192.168.2.240"),
+            ("sftp_port", "SSH 端口", "22"),
+            ("sftp_user", "只读用户", "smsi-archive-reader"),
+            ("sftp_root", "SFTP 根目录", "/archive"),
+            ("sftp_key_file", "SSH 私钥", ""),
+            ("sftp_known_hosts_file", "known_hosts", ""),
+        )
+        for row, (key, label, default) in enumerate(fields, start=2):
+            tk.Label(connection, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=row, column=0, sticky="w", padx=(14, 8), pady=5)
+            variable = tk.StringVar(value=default)
+            self.ubuntu_connection_vars[key] = variable
+            field = tk.Frame(connection, bg=self.COLORS["surface"])
+            field.grid(row=row, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=4)
+            field.grid_columnconfigure(0, weight=1)
+            ttk.Entry(field, textvariable=variable).grid(row=0, column=0, sticky="ew")
+            if key in {"sftp_key_file", "sftp_known_hosts_file"}:
+                ttk.Button(field, text="选择…", width=8, command=lambda target=variable: self._choose_file(target)).grid(row=0, column=1, padx=(7, 0))
+        self.connection_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(connection, text="启用 Ubuntu 归档连接", variable=self.connection_enabled).grid(row=8, column=1, sticky="w", padx=(0, 14), pady=(5, 13))
+        connection.grid_columnconfigure(1, weight=1)
+
 
     def _build_transfer_bar(self) -> None:
         bar = tk.Frame(self.root, height=52, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
@@ -591,20 +632,40 @@ class ArchiveDesktopApp:
 
     def show_page(self, key: str) -> None:
         self.active_page = key
-        self.pages[key].tkraise()
+        page_key = "files" if key == "local" else key
+        self.pages[page_key].tkraise()
         for page, button in self.nav_buttons.items():
             active = page == key
             button.configure(
                 bg=self.COLORS["brand_soft"] if active else self.COLORS["sidebar"],
                 fg=self.COLORS["brand_dark"] if active else self.COLORS["sidebar_muted"],
             )
-        if key == "jobs":
+        if key == "local":
+            self.set_scope("local")
+        elif key == "files":
+            self.set_scope("remote")
+        elif key == "jobs":
             self._render_jobs()
         elif key == "settings":
             self._load_settings()
 
     def set_scope(self, scope: str) -> None:
         self.active_scope = scope
+        if scope == "local":
+            self.local_profiles_cache = self.store.local_profiles(self.store.load())
+            self.files_title_label.configure(text="本地文件")
+            self.files_subtitle_label.configure(text=str(self.store.load().archive_root))
+            self.connection_title_label.configure(text="本地归档")
+            self.connection_status_label.configure(text="已验证副本", fg=self.COLORS["brand_dark"])
+            self.sync_all_button.pack_forget()
+        else:
+            connection = next((item for item in self.store.load().profiles if item.source_type == "ubuntu_sftp"), None)
+            self.files_title_label.configure(text="归档同步")
+            self.files_subtitle_label.configure(text="Ubuntu 归档目录")
+            self.connection_title_label.configure(text="Ubuntu 归档源")
+            if connection is not None:
+                self.connection_status_label.configure(text=f"{connection.sftp_user}@{connection.sftp_host}:{connection.sftp_port} · {connection.sftp_root}", fg=self.COLORS["brand_dark"])
+            self.sync_all_button.pack(side="left")
         for key, button in self.scope_buttons.items():
             active = key == scope
             button.configure(
@@ -616,35 +677,119 @@ class ArchiveDesktopApp:
         if not self.browser[scope]["dates"]:
             self.refresh_dates(force=True)
 
+    def refresh_source(self) -> None:
+        if self.active_scope == "remote":
+            self._discover_collectors()
+            return
+        self.local_profiles_cache = self.store.local_profiles(self.store.load())
+        self.browser["local"] = self._new_browser_state()
+        self._refresh_profile_choices()
+        if self.local_profiles_cache:
+            self.refresh_dates(force=True)
+        else:
+            self._show_empty_browser("本地还没有已验证归档")
+
     def _profile_choices(self) -> list[ProfileConfig]:
-        return [profile for profile in self.store.load().profiles if profile.enabled]
+        profiles = self.remote_profiles if self.active_scope == "remote" else self.local_profiles_cache
+        return [profile for profile in profiles if profile.enabled]
 
     def _refresh_profile_choices(self) -> None:
         profiles = self._profile_choices()
-        labels = [profile.display_name for profile in profiles]
-        self.profile_combo["values"] = labels
         state = self.browser[self.active_scope]
         selected = next((profile for profile in profiles if profile.profile_id == state["profile_id"]), None)
         if selected is None and profiles:
             selected = profiles[0]
             state["profile_id"] = selected.profile_id
-        self.profile_var.set(selected.display_name if selected else "")
-        self.profile_combo.configure(state="readonly" if profiles else "disabled")
+        self.selected_profile_ids[self.active_scope] = selected.profile_id if selected else ""
+        for button in self.collector_buttons.values():
+            button.destroy()
+        self.collector_buttons.clear()
+        for profile in profiles:
+            button = tk.Button(
+                self.collector_strip,
+                text=profile.collector_id,
+                relief="flat",
+                bd=0,
+                padx=10,
+                pady=5,
+                font=("Segoe UI Semibold", 8),
+                command=lambda profile_id=profile.profile_id: self._profile_selected(profile_id),
+            )
+            button.pack(side="left", padx=3)
+            self.collector_buttons[profile.profile_id] = button
+        self._paint_collector_buttons()
         self.refresh_button.configure(state="normal" if profiles else "disabled")
         if hasattr(self, "sync_all_button"):
-            self.sync_all_button.configure(state="normal" if profiles else "disabled")
+            self.sync_all_button.configure(state="normal" if profiles and self.active_scope == "remote" else "disabled")
+        if hasattr(self, "collector_status_label"):
+            if profiles:
+                source = "自动发现" if self.active_scope == "remote" else "本地已存在"
+                self.collector_status_label.configure(text=f"{source} {len(profiles)} 个归档目录")
+            elif self.active_scope == "local":
+                self.collector_status_label.configure(text="本地还没有已发布的 collector=* 归档")
+            else:
+                self.collector_status_label.configure(text="尚未发现 collector=* 归档目录")
 
     def _selected_profile(self) -> ProfileConfig | None:
-        name = self.profile_var.get()
-        return next((item for item in self._profile_choices() if item.display_name == name), None)
+        profile_id = self.browser[self.active_scope].get("profile_id") or self.selected_profile_ids.get(self.active_scope, "")
+        return next((item for item in self._profile_choices() if item.profile_id == profile_id), None)
 
-    def _profile_changed(self) -> None:
-        profile = self._selected_profile()
+    def _profile_selected(self, profile_id: str) -> None:
+        profile = next((item for item in self._profile_choices() if item.profile_id == profile_id), None)
         if profile is None:
             return
         self.browser[self.active_scope] = self._new_browser_state()
         self.browser[self.active_scope]["profile_id"] = profile.profile_id
+        self.selected_profile_ids[self.active_scope] = profile.profile_id
+        self._paint_collector_buttons()
         self.refresh_dates(force=True)
+
+    def _paint_collector_buttons(self) -> None:
+        selected = self.browser[self.active_scope].get("profile_id")
+        for profile_id, button in self.collector_buttons.items():
+            active = profile_id == selected
+            button.configure(
+                bg=self.COLORS["brand"] if active else self.COLORS["surface2"],
+                fg="#ffffff" if active else self.COLORS["muted"],
+                activebackground=self.COLORS["brand_dark"] if active else self.COLORS["brand_soft"],
+                activeforeground="#ffffff" if active else self.COLORS["brand_dark"],
+            )
+
+    def _discover_collectors(self) -> None:
+        connection = next((item for item in self.store.load().profiles if item.source_type == "ubuntu_sftp"), None)
+        if connection is None or not connection.enabled:
+            self.remote_profiles = []
+            self.connection_status_label.configure(text="未配置 Ubuntu 连接", fg=self.COLORS["warn"])
+            self._refresh_profile_choices()
+            self._show_empty_browser("请在设置中填写 Ubuntu 连接")
+            return
+        self.connection_status_label.configure(
+            text=f"{connection.sftp_user}@{connection.sftp_host}:{connection.sftp_port} · {connection.sftp_root}",
+            fg=self.COLORS["brand_dark"],
+        )
+        self.refresh_collectors_button.configure(state="disabled")
+
+        def operation() -> list[ProfileConfig]:
+            runtime = self.store.runtime_config(self.store.load())
+            return runtime.profiles
+
+        self._run_async(
+            "discover",
+            "正在读取 Ubuntu 归档目录…",
+            operation,
+            self._collectors_loaded,
+        )
+
+    def _collectors_loaded(self, profiles: list[ProfileConfig]) -> None:
+        self.remote_profiles = list(profiles)
+        self.refresh_collectors_button.configure(state="normal")
+        self._refresh_profile_choices()
+        if profiles:
+            self.file_notice.configure(text=f"已发现 {len(profiles)} 个归档目录，可以浏览或同步。", fg=self.COLORS["brand_dark"])
+            if self.active_scope == "remote" and not self.browser["remote"]["dates"]:
+                self.refresh_dates(force=True)
+        else:
+            self.file_notice.configure(text="Ubuntu 根目录下没有发现 collector=* 归档目录。", fg=self.COLORS["warn"])
 
     def _run_async(
         self,
@@ -680,10 +825,13 @@ class ArchiveDesktopApp:
                     self.refresh_button.configure(
                         state="normal" if self._selected_profile() else "disabled"
                     )
+                if channel == "discover":
+                    self.refresh_collectors_button.configure(state="normal")
                 if status == "error":
-                    if channel_is_visible:
-                        self.file_notice.configure(text=str(result), fg=self.COLORS["bad"])
-                        messagebox.showerror("操作失败", str(result), parent=self.root)
+                    self.file_notice.configure(text=str(result), fg=self.COLORS["bad"])
+                    if channel == "discover":
+                        self.connection_status_label.configure(text="连接失败", fg=self.COLORS["bad"])
+                    messagebox.showerror("操作失败", str(result), parent=self.root)
                 elif callback is not None:
                     callback(result)
         except queue.Empty:
@@ -693,7 +841,7 @@ class ArchiveDesktopApp:
     def refresh_dates(self, *, force: bool = False) -> None:
         profile = self._selected_profile()
         if profile is None:
-            self._show_empty_browser("请先在设置中添加采集服务器")
+            self._show_empty_browser("没有可浏览的归档目录")
             return
         state = self.browser[self.active_scope]
         if not force and state["profile_id"] == profile.profile_id and state["dates"]:
@@ -703,7 +851,7 @@ class ArchiveDesktopApp:
         state["profile_id"] = profile.profile_id
 
         def operation() -> dict[str, Any]:
-            manager = ArchiveManager(self.store.load(), self.database)
+            manager = ArchiveManager(self._browser_config(scope), self.database)
             return manager.browse_dates(profile.profile_id, scope=scope)
 
         self._run_async(
@@ -738,7 +886,7 @@ class ArchiveDesktopApp:
         archive_date = state["archive_date"]
 
         def operation() -> dict[str, Any]:
-            manager = ArchiveManager(self.store.load(), self.database)
+            manager = ArchiveManager(self._browser_config(scope), self.database)
             return manager.browse_files(profile_id, archive_date, scope=scope, path=path)
 
         self._run_async(
@@ -747,6 +895,11 @@ class ArchiveDesktopApp:
             operation,
             lambda result: self._directory_loaded(scope, result),
         )
+
+    def _browser_config(self, scope: str) -> ClientConfig:
+        config = self.store.load()
+        profiles = self.remote_profiles if scope == "remote" else self.local_profiles_cache
+        return replace(config, profiles=list(profiles))
 
     def _directory_loaded(self, scope: str, result: dict[str, Any]) -> None:
         state = self.browser[scope]
@@ -1023,7 +1176,7 @@ class ArchiveDesktopApp:
             )
         if self.active_page == "jobs":
             self._render_jobs()
-        if self.active_page == "files":
+        if self.active_page in {"files", "local"}:
             self._update_download_action()
         self.root.after(1000, self._refresh_runtime)
 
@@ -1031,10 +1184,10 @@ class ArchiveDesktopApp:
         if not hasattr(self, "jobs_tree"):
             return
         self.jobs_tree.delete(*self.jobs_tree.get_children())
-        profiles = {item.profile_id: item.display_name for item in self.store.load().profiles}
         for job in self.database.jobs(200):
             action = {"scan": "检查 Ubuntu 归档", "scan_download": "同步缺失归档", "download": "指定日期下载", "verify": "重新校验"}.get(str(job.get("action") or ""), str(job.get("action") or "任务"))
-            location = " · ".join(filter(None, (profiles.get(str(job.get("profile_id") or ""), str(job.get("profile_id") or "")), str(job.get("archive_date") or "")))) or "全部采集服务器"
+            profile_id = str(job.get("profile_id") or "")
+            location = " · ".join(filter(None, (f"collector={profile_id}" if profile_id else "全部归档目录", str(job.get("archive_date") or ""))))
             values = (
                 location,
                 {"queued": "排队中", "running": "执行中", "cancelling": "正在取消", "completed": "已完成", "cancelled": "已取消", "failed": "失败"}.get(str(job.get("status") or ""), str(job.get("status") or "")),
@@ -1060,8 +1213,19 @@ class ArchiveDesktopApp:
         for key, value in values.items():
             if key in self.setting_vars:
                 self.setting_vars[key].set(value)
-        self.profile_drafts = list(config.profiles)
-        self._render_profile_drafts()
+        connection = next((item for item in config.profiles if item.source_type == "ubuntu_sftp"), None)
+        if connection is not None:
+            values = {
+                "sftp_host": connection.sftp_host,
+                "sftp_port": str(connection.sftp_port),
+                "sftp_user": connection.sftp_user,
+                "sftp_root": connection.sftp_root,
+                "sftp_key_file": connection.sftp_key_file,
+                "sftp_known_hosts_file": connection.sftp_known_hosts_file,
+            }
+            for key, value in values.items():
+                self.ubuntu_connection_vars[key].set(value)
+            self.connection_enabled.set(connection.enabled)
         self._update_advanced_summary()
 
     def _update_advanced_summary(self) -> None:
@@ -1076,27 +1240,15 @@ class ArchiveDesktopApp:
             )
         )
 
-    def _render_profile_drafts(self) -> None:
-        if not hasattr(self, "profiles_tree"):
-            return
-        self.profiles_tree.delete(*self.profiles_tree.get_children())
-        for index, profile in enumerate(self.profile_drafts):
-            self.profiles_tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                text=f"{profile.display_name} · {profile.profile_id}",
-                values=(
-                    profile.collector_id,
-                    f"{profile.sftp_user}@{profile.sftp_host}:{profile.sftp_port}",
-                    "已启用" if profile.enabled else "已停用",
-                ),
-            )
-
     def choose_archive_root(self) -> None:
         selected = filedialog.askdirectory(parent=self.root, initialdir=self.setting_vars["local_root"].get() or str(Path.home()))
         if selected:
             self.setting_vars["local_root"].set(selected)
+
+    def _choose_file(self, variable: tk.Variable) -> None:
+        selected = filedialog.askopenfilename(parent=self.root)
+        if selected:
+            variable.set(selected)
 
     def edit_advanced_settings(self) -> None:
         dialog = tk.Toplevel(self.root)
@@ -1152,118 +1304,20 @@ class ArchiveDesktopApp:
         ttk.Button(buttons, text="确定", style="Primary.TButton", command=apply).pack(side="right", padx=4)
         container.grid_columnconfigure(1, weight=1)
 
-    def edit_selected_profile(self) -> None:
-        selection = self.profiles_tree.selection()
-        if not selection:
-            messagebox.showinfo("采集服务器", "请先选择一个采集服务器。", parent=self.root)
-            return
-        self.edit_profile(int(selection[0]))
-
-    def delete_selected_profile(self) -> None:
-        selection = self.profiles_tree.selection()
-        if not selection:
-            return
-        index = int(selection[0])
-        profile = self.profile_drafts[index]
-        if not messagebox.askyesno("删除采集服务器", f"确定删除 {profile.display_name}？", parent=self.root):
-            return
-        self.profile_drafts.pop(index)
-        self._render_profile_drafts()
-
-    def edit_profile(self, index: int | None) -> None:
-        if self.profile_dialog is not None and self.profile_dialog.winfo_exists():
-            self.profile_dialog.focus_set()
-            return
-        profile = self.profile_drafts[index] if index is not None else ProfileConfig(
-            profile_id="collector-new",
-            display_name="新采集服务器",
-            collector_id="collector-new",
-        )
-        dialog = tk.Toplevel(self.root)
-        self.profile_dialog = dialog
-        dialog.title("编辑采集服务器" if index is not None else "添加采集服务器")
-        dialog.geometry("620x560")
-        dialog.minsize(580, 520)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(bg=self.COLORS["bg"])
-        container = tk.Frame(dialog, bg=self.COLORS["surface"], padx=18, pady=16)
-        container.pack(fill="both", expand=True, padx=14, pady=14)
-        values = asdict(profile)
-        variables: dict[str, tk.Variable] = {}
-        fields = (
-            ("display_name", "显示名称"),
-            ("collector_id", "Collector ID"),
-            ("sftp_host", "Ubuntu 主机"),
-            ("sftp_port", "SSH 端口"),
-            ("sftp_user", "只读用户"),
-            ("sftp_key_file", "SSH 私钥文件"),
-            ("sftp_known_hosts_file", "known_hosts 文件"),
-            ("sftp_root", "归档根目录"),
-        )
-        row = 0
-        for key, label in fields[:2]:
-            tk.Label(container, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8)).grid(row=row, column=0, sticky="w", pady=5)
-            variable = tk.StringVar(value=str(values.get(key) or ""))
-            variables[key] = variable
-            ttk.Entry(container, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=5)
-            row += 1
-        browse_fields = {"sftp_key_file", "sftp_known_hosts_file"}
-        for key, label in fields[2:]:
-            label_widget = tk.Label(container, text=label, bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
-            label_widget.grid(row=row, column=0, sticky="w", pady=5)
-            variable = tk.StringVar(value=str(values.get(key) or ""))
-            variables[key] = variable
-            field = tk.Frame(container, bg=self.COLORS["surface"])
-            field.grid(row=row, column=1, sticky="ew", pady=5)
-            field.grid_columnconfigure(0, weight=1)
-            ttk.Entry(field, textvariable=variable).grid(row=0, column=0, sticky="ew")
-            if key in browse_fields:
-                def browse(target=variable) -> None:
-                    selected = filedialog.askopenfilename(parent=dialog)
-                    if selected:
-                        target.set(selected)
-                ttk.Button(field, text="…", width=3, command=browse).grid(row=0, column=1, padx=(5, 0))
-            row += 1
-        enabled = tk.BooleanVar(value=profile.enabled)
-        variables["enabled"] = enabled
-        ttk.Checkbutton(container, text="启用采集服务器", variable=enabled).grid(row=row, column=1, sticky="w", pady=8)
-        row += 1
-        error_var = tk.StringVar()
-        tk.Label(container, textvariable=error_var, bg=self.COLORS["surface"], fg=self.COLORS["bad"], font=("Segoe UI", 8), wraplength=520, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=5)
-        row += 1
-        buttons = tk.Frame(container, bg=self.COLORS["surface"])
-        buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(10, 0))
-        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="right", padx=4)
-
-        def save_profile() -> None:
-            try:
-                candidate = ProfileConfig.from_mapping({
-                    key: variable.get() for key, variable in variables.items()
-                } | {
-                    "profile_id": variables["collector_id"].get(),
-                    "source_type": "ubuntu_sftp",
-                })
-                errors = candidate.validate()
-                if errors:
-                    raise ValueError("；".join(errors))
-                if index is None:
-                    self.profile_drafts.append(candidate)
-                else:
-                    self.profile_drafts[index] = candidate
-                self._render_profile_drafts()
-                dialog.destroy()
-            except (ValueError, TypeError) as exc:
-                error_var.set(str(exc))
-
-        ttk.Button(buttons, text="确定", style="Primary.TButton", command=save_profile).pack(side="right", padx=4)
-        container.grid_columnconfigure(1, weight=1)
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        dialog.bind("<Destroy>", lambda _event: setattr(self, "profile_dialog", None))
-
     def save_settings(self) -> None:
         current = self.store.load()
         try:
+            profiles: list[ProfileConfig] = []
+            if self.connection_enabled.get():
+                values = {key: variable.get() for key, variable in self.ubuntu_connection_vars.items()}
+                profiles = [ProfileConfig.from_mapping({
+                    "profile_id": "ubuntu",
+                    "display_name": "Ubuntu 归档",
+                    "collector_id": "all",
+                    "source_type": "ubuntu_sftp",
+                    "enabled": True,
+                    **values,
+                })]
             config = ClientConfig(
                 config_version=CONFIG_VERSION,
                 local_root=str(self.setting_vars["local_root"].get()).strip(),
@@ -1278,13 +1332,16 @@ class ArchiveDesktopApp:
                 web_port=current.web_port,
                 password_hash=current.password_hash,
                 session_secret=current.session_secret,
-                profiles=list(self.profile_drafts),
+                profiles=profiles,
             )
             self.store.save(config)
             self.service.wake()
             self.browser = {"remote": self._new_browser_state(), "local": self._new_browser_state()}
+            self.remote_profiles = []
+            self.local_profiles_cache = []
             self._refresh_profile_choices()
             self._update_advanced_summary()
+            self._discover_collectors()
             messagebox.showinfo("设置", "设置已保存。", parent=self.root)
         except (ValueError, TypeError) as exc:
             messagebox.showerror("设置无效", str(exc), parent=self.root)
