@@ -283,8 +283,6 @@ class ArchiveDesktopApp:
         self.list_entries: dict[str, dict[str, Any]] = {}
         self.remote_profiles: list[ProfileConfig] = []
         self.local_profiles_cache: list[ProfileConfig] = []
-        self.selected_profile_ids = {"remote": "", "local": ""}
-        self.collector_buttons: dict[str, tk.Button] = {}
         self.ubuntu_connection_vars: dict[str, tk.Variable] = {}
         self.nav_buttons: dict[str, tk.Button] = {}
         self.pages: dict[str, tk.Frame] = {}
@@ -464,9 +462,6 @@ class ArchiveDesktopApp:
         self.connection_status_label.grid(row=0, column=1, sticky="w", pady=(11, 3))
         self.collector_status_label = tk.Label(connection, text="归档目录自动发现中", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=("Segoe UI", 8))
         self.collector_status_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 11))
-        self.collector_strip = tk.Frame(connection, bg=self.COLORS["surface"])
-        self.collector_strip.grid(row=0, column=2, rowspan=2, sticky="e", padx=14, pady=8)
-
         browser = tk.Frame(page, bg=self.COLORS["surface"], highlightbackground=self.COLORS["line"], highlightthickness=1)
         browser.pack(fill="both", expand=True)
         toolbar = tk.Frame(browser, bg=self.COLORS["surface2"], height=54)
@@ -476,7 +471,7 @@ class ArchiveDesktopApp:
         self.up_button = ttk.Button(toolbar, text="↑", width=3, command=self.go_up)
         self.up_button.pack(side="left", padx=(10, 4), pady=9)
         self.refresh_button = ttk.Button(
-            toolbar, text="↻", width=3, command=lambda: self.refresh_dates(force=True)
+            toolbar, text="↻", width=3, command=self.refresh_browser
         )
         self.refresh_button.pack(side="left", padx=(0, 6), pady=9)
         self.path_var = tk.StringVar(value="归档根目录")
@@ -689,6 +684,12 @@ class ArchiveDesktopApp:
         else:
             self._show_empty_browser("本地还没有已验证归档")
 
+    def refresh_browser(self) -> None:
+        if not self.browser[self.active_scope]["profile_id"]:
+            self.refresh_source()
+            return
+        self.refresh_dates(force=True)
+
     def _profile_choices(self) -> list[ProfileConfig]:
         profiles = self.remote_profiles if self.active_scope == "remote" else self.local_profiles_cache
         return [profile for profile in profiles if profile.enabled]
@@ -697,28 +698,9 @@ class ArchiveDesktopApp:
         profiles = self._profile_choices()
         state = self.browser[self.active_scope]
         selected = next((profile for profile in profiles if profile.profile_id == state["profile_id"]), None)
-        if selected is None and profiles:
-            selected = profiles[0]
-            state["profile_id"] = selected.profile_id
-        self.selected_profile_ids[self.active_scope] = selected.profile_id if selected else ""
-        for button in self.collector_buttons.values():
-            button.destroy()
-        self.collector_buttons.clear()
-        for profile in profiles:
-            button = tk.Button(
-                self.collector_strip,
-                text=profile.collector_id,
-                relief="flat",
-                bd=0,
-                padx=10,
-                pady=5,
-                font=("Segoe UI Semibold", 8),
-                command=lambda profile_id=profile.profile_id: self._profile_selected(profile_id),
-            )
-            button.pack(side="left", padx=3)
-            self.collector_buttons[profile.profile_id] = button
-        self._paint_collector_buttons()
-        self.refresh_button.configure(state="normal" if profiles else "disabled")
+        if selected is None:
+            state["profile_id"] = ""
+        self.refresh_button.configure(state="normal")
         if hasattr(self, "sync_all_button"):
             self.sync_all_button.configure(state="normal" if profiles and self.active_scope == "remote" else "disabled")
         if hasattr(self, "collector_status_label"):
@@ -731,7 +713,7 @@ class ArchiveDesktopApp:
                 self.collector_status_label.configure(text="尚未发现 collector=* 归档目录")
 
     def _selected_profile(self) -> ProfileConfig | None:
-        profile_id = self.browser[self.active_scope].get("profile_id") or self.selected_profile_ids.get(self.active_scope, "")
+        profile_id = self.browser[self.active_scope].get("profile_id")
         return next((item for item in self._profile_choices() if item.profile_id == profile_id), None)
 
     def _profile_selected(self, profile_id: str) -> None:
@@ -740,20 +722,7 @@ class ArchiveDesktopApp:
             return
         self.browser[self.active_scope] = self._new_browser_state()
         self.browser[self.active_scope]["profile_id"] = profile.profile_id
-        self.selected_profile_ids[self.active_scope] = profile.profile_id
-        self._paint_collector_buttons()
         self.refresh_dates(force=True)
-
-    def _paint_collector_buttons(self) -> None:
-        selected = self.browser[self.active_scope].get("profile_id")
-        for profile_id, button in self.collector_buttons.items():
-            active = profile_id == selected
-            button.configure(
-                bg=self.COLORS["brand"] if active else self.COLORS["surface2"],
-                fg="#ffffff" if active else self.COLORS["muted"],
-                activebackground=self.COLORS["brand_dark"] if active else self.COLORS["brand_soft"],
-                activeforeground="#ffffff" if active else self.COLORS["brand_dark"],
-            )
 
     def _discover_collectors(self) -> None:
         connection = next((item for item in self.store.load().profiles if item.source_type == "ubuntu_sftp"), None)
@@ -822,9 +791,7 @@ class ArchiveDesktopApp:
                     continue
                 channel_is_visible = channel == f"browser:{self.active_scope}"
                 if channel_is_visible:
-                    self.refresh_button.configure(
-                        state="normal" if self._selected_profile() else "disabled"
-                    )
+                    self.refresh_button.configure(state="normal")
                 if channel == "discover":
                     self.refresh_collectors_button.configure(state="normal")
                 if status == "error":
@@ -841,7 +808,8 @@ class ArchiveDesktopApp:
     def refresh_dates(self, *, force: bool = False) -> None:
         profile = self._selected_profile()
         if profile is None:
-            self._show_empty_browser("没有可浏览的归档目录")
+            self.browser[self.active_scope] = self._new_browser_state()
+            self._render_browser_state()
             return
         state = self.browser[self.active_scope]
         if not force and state["profile_id"] == profile.profile_id and state["dates"]:
@@ -915,23 +883,27 @@ class ArchiveDesktopApp:
 
     def go_up(self) -> None:
         state = self.browser[self.active_scope]
-        if not state["archive_date"]:
-            return
         if state["path"]:
             self._load_directory("/".join(state["path"].split("/")[:-1]))
             return
-        state["archive_date"] = ""
-        state["path"] = ""
-        state["result"] = {}
+        if state["archive_date"]:
+            state["archive_date"] = ""
+            state["result"] = {}
+        elif state["profile_id"]:
+            self.browser[self.active_scope] = self._new_browser_state()
+        else:
+            return
         self._render_browser_state()
 
     def _render_browser_state(self) -> None:
         state = self.browser[self.active_scope]
         self.search_var.set("")
+        profile = self._selected_profile()
+        root_label = "Ubuntu 归档" if self.active_scope == "remote" else "本地归档"
         self.path_var.set(
-            " / ".join(part for part in ("归档根目录", state["archive_date"], state["path"]) if part)
+            " / ".join(part for part in (root_label, profile.collector_id if profile else "", state["archive_date"], state["path"]) if part)
         )
-        self.up_button.configure(state="normal" if state["archive_date"] else "disabled")
+        self.up_button.configure(state="normal" if state["profile_id"] else "disabled")
         self._render_directory_tree()
         self._render_current_list()
         self._update_download_action()
@@ -943,16 +915,27 @@ class ArchiveDesktopApp:
             tree.delete(*tree.get_children())
             self.tree_actions.clear()
             state = self.browser[self.active_scope]
-            root_id = tree.insert("", "end", text="归档文件", open=True)
+            root_text = "Ubuntu 归档" if self.active_scope == "remote" else "本地归档"
+            root_id = tree.insert("", "end", text=root_text, open=True)
             self.tree_actions[root_id] = ("root", "")
+            profiles = self._profile_choices()
+            if not state["profile_id"]:
+                for profile in profiles:
+                    item_id = tree.insert(root_id, "end", text=f"▸  collector={profile.collector_id}")
+                    self.tree_actions[item_id] = ("profile", profile.profile_id)
+                return
+            profile = self._selected_profile()
+            if profile is None:
+                return
+            profile_id = tree.insert(root_id, "end", text=f"▸  collector={profile.collector_id}", open=True)
+            self.tree_actions[profile_id] = ("profile", profile.profile_id)
             if not state["archive_date"]:
                 for item in state["dates"]:
                     archive_date = str(item.get("archive_date") or "")
-                    item_id = tree.insert(root_id, "end", text=f"▣  {archive_date}")
+                    item_id = tree.insert(profile_id, "end", text=f"▣  {archive_date}")
                     self.tree_actions[item_id] = ("date", archive_date)
-                tree.item(root_id, open=True)
                 return
-            date_id = tree.insert(root_id, "end", text=f"▣  {state['archive_date']}", open=True)
+            date_id = tree.insert(profile_id, "end", text=f"▣  {state['archive_date']}", open=True)
             self.tree_actions[date_id] = ("path", "")
             nodes: dict[str, str] = {"": date_id}
             paths: set[str] = set()
@@ -989,12 +972,14 @@ class ArchiveDesktopApp:
         kind, value = action
         state = self.browser[self.active_scope]
         if kind == "root":
-            if not state["archive_date"]:
+            if not state["profile_id"]:
                 return
-            state["archive_date"] = ""
-            state["path"] = ""
-            state["result"] = {}
+            self.browser[self.active_scope] = self._new_browser_state()
             self._render_browser_state()
+        elif kind == "profile":
+            if state["profile_id"] == value and not state["archive_date"]:
+                return
+            self._profile_selected(value)
         elif kind == "date":
             if state["archive_date"] == value:
                 return
@@ -1007,7 +992,17 @@ class ArchiveDesktopApp:
     def _visible_entries(self) -> list[dict[str, Any]]:
         state = self.browser[self.active_scope]
         query_text = self.search_var.get().strip().casefold()
-        if not state["archive_date"]:
+        if not state["profile_id"]:
+            entries = [
+                {
+                    "type": "collector",
+                    "name": f"collector={profile.collector_id}",
+                    "path": f"collector={profile.collector_id}",
+                    "profile_id": profile.profile_id,
+                }
+                for profile in self._profile_choices()
+            ]
+        elif not state["archive_date"]:
             entries = [
                 {
                     "type": "date",
@@ -1039,7 +1034,9 @@ class ArchiveDesktopApp:
         entries = self._visible_entries()
         for index, item in enumerate(entries):
             item_type = str(item.get("type") or "file")
-            if item_type == "date":
+            if item_type == "collector":
+                values = ("归档目录", "--", "自动发现", "--")
+            elif item_type == "date":
                 values = (
                     "归档日期",
                     bytes_text(item.get("bytes_total")),
@@ -1067,23 +1064,27 @@ class ArchiveDesktopApp:
                     "已列入清单" if item.get("remote_state") == "listed" else "本地对象",
                     "下载中" if item.get("state") == "downloading" else "已验证" if item.get("location") == "verified" else "暂存目录",
                 )
-            icon = {"date": "▣", "directory": "▸"}.get(item_type, "▤")
+            icon = {"collector": "▸", "date": "▣", "directory": "▸"}.get(item_type, "▤")
             item_id = self.file_list.insert(
                 "", "end", text=f"{icon}  {str(item.get('name') or '')}", values=values
             )
             self.list_entries[item_id] = item
         result = state.get("result") or {}
         suffix = f" · 搜索结果 {len(entries)} 项" if self.search_var.get().strip() else ""
-        self.file_summary.configure(
-            text=f"{len(entries)} 项 · {bytes_text(result.get('bytes_total'))} · {int(result.get('row_count') or 0):,} 行{suffix}"
-        )
-        if not state["archive_date"]:
+        if not state["profile_id"]:
+            self.file_summary.configure(text=f"{len(entries)} 个归档目录{suffix}")
+            self.file_notice.configure(text=f"{len(entries)} 个归档目录", fg=self.COLORS["muted"])
+        else:
+            self.file_summary.configure(
+                text=f"{len(entries)} 项 · {bytes_text(result.get('bytes_total'))} · {int(result.get('row_count') or 0):,} 行{suffix}"
+            )
+        if state["profile_id"] and not state["archive_date"]:
             hint = " · 双击日期查看对象" if state["dates"] else ""
             self.file_notice.configure(
                 text=f"{len(state['dates'])} 个归档日期{hint}",
                 fg=self.COLORS["muted"],
             )
-        else:
+        elif state["archive_date"]:
             detail = str(result.get("detail") or "")
             self.file_notice.configure(text=detail or "目录已读取", fg=self.COLORS["muted"])
 
@@ -1092,7 +1093,9 @@ class ArchiveDesktopApp:
         if not selection:
             return
         item = self.list_entries.get(selection[0]) or {}
-        if item.get("type") == "date":
+        if item.get("type") == "collector":
+            self._profile_selected(str(item.get("profile_id") or ""))
+        elif item.get("type") == "date":
             self.open_date(str(item.get("archive_date") or ""))
         elif item.get("type") == "directory":
             self._load_directory(str(item.get("path") or ""))

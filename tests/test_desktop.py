@@ -52,7 +52,7 @@ def test_cached_directory_navigation_keeps_one_level_only() -> None:
 def test_desktop_preflight_does_not_create_a_window(tmp_path) -> None:
     result = preflight(ConfigStore(tmp_path / "state"))
 
-    assert result["version"] == "3.3.0"
+    assert result["version"] == "3.3.1"
     assert result["profiles"] == 0
     assert result["tk"]
     assert (tmp_path / "state" / "config.json").exists()
