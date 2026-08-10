@@ -40,7 +40,7 @@
 
 正常启动不会保留黑色控制台；环境检查日志位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\windows-launcher.log`，桌面程序启动异常时详见同目录下的 `desktop-error.log`。
 
-Windows 从 Ubuntu 内网下载时，在来源中选择“Ubuntu 内网（SFTP）”，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。客户端仍会重新执行对象 SHA-256、Parquet schema、行数和业务内容摘要校验；Ubuntu 删除源文件不会删除 Windows 已验证副本。
+Windows 在“设置”中添加 Ubuntu 连接，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。客户端仍会重新执行对象 SHA-256、Parquet schema、行数和业务内容摘要校验；Ubuntu 删除源文件不会删除 Windows 已验证副本。
 
 ## Ubuntu
 
