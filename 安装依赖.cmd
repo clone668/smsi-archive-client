@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 where py >nul 2>nul
 if errorlevel 1 (
-  echo 未找到 Python Launcher，请先安装 Python 3.11 或更高版本。
+  echo 未找到 Python Launcher，请先安装 Python 3.10 或更高版本。
   pause
   exit /b 1
 )

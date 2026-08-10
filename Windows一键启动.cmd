@@ -1,56 +1,86 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
+title SMSI Archive Backup Client
+
+set "STATE_DIR=%LOCALAPPDATA%\SMSIArchiveBackupClient"
+if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>nul
+set "LOG_FILE=%STATE_DIR%\windows-launcher.log"
+>"%LOG_FILE%" echo [%date% %time%] Checking the Windows client environment
 
 where py >nul 2>nul
-if errorlevel 1 (
-  echo 未找到 Python。请先安装 Python 3.11 或更高版本，并勾选 Python Launcher。
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto :try_python
+py -3 -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,10) else 1)" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :try_python
+set "PYTHON_EXE=py"
+set "PYTHON_ARGS=-3"
+goto :python_ready
+
+:try_python
+where python >nul 2>nul
+if errorlevel 1 goto :python_missing
+python -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,10) else 1)" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :python_missing
+set "PYTHON_EXE=python"
+set "PYTHON_ARGS="
+
+:python_ready
+"%PYTHON_EXE%" %PYTHON_ARGS% --version >>"%LOG_FILE%" 2>&1
 
 where rclone >nul 2>nul
-if errorlevel 1 (
-  where winget >nul 2>nul
-  if errorlevel 1 (
-    echo 未找到 rclone 和 winget，请先安装 rclone。
-    pause
-    exit /b 1
-  )
-  echo 正在安装 rclone...
-  winget install --id Rclone.Rclone -e --accept-package-agreements --accept-source-agreements
-  if errorlevel 1 goto :failed
-)
+if not errorlevel 1 goto :rclone_ready
+where winget >nul 2>nul
+if errorlevel 1 goto :rclone_warning
+echo Installing rclone for Google Drive access...
+winget install --id Rclone.Rclone -e --accept-package-agreements --accept-source-agreements >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :rclone_warning
+goto :rclone_ready
 
-if not exist ".venv\Scripts\python.exe" (
-  echo 正在创建 Python 虚拟环境...
-  py -3 -m venv .venv
-  if errorlevel 1 goto :failed
-)
+:rclone_warning
+echo rclone is unavailable. Ubuntu SFTP still works; Google Drive requires rclone.
+>>"%LOG_FILE%" echo rclone was not found or could not be installed
 
-".venv\Scripts\python.exe" -c "from pathlib import Path; import sys; marker=Path('.venv/requirements.installed'); current=Path('requirements.txt').read_bytes(); sys.exit(0 if marker.exists() and marker.read_bytes()==current else 1)"
-if errorlevel 1 (
-  echo 正在安装或更新依赖...
-  ".venv\Scripts\python.exe" -m pip install --upgrade pip
-  if errorlevel 1 goto :failed
-  ".venv\Scripts\pip.exe" install -r requirements.txt
-  if errorlevel 1 goto :failed
-  copy /y requirements.txt ".venv\requirements.installed" >nul
-)
+:rclone_ready
+if exist ".venv\Scripts\python.exe" goto :venv_ready
+echo Creating the Python environment...
+"%PYTHON_EXE%" %PYTHON_ARGS% -m venv .venv >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :failed
 
-netstat -ano | findstr /r /c:":8788 .*LISTENING" >nul
-if not errorlevel 1 (
-  start "" http://127.0.0.1:8788/
-  exit /b 0
-)
+:venv_ready
+".venv\Scripts\python.exe" -c "from pathlib import Path; import sys; marker=Path('.venv/requirements.installed'); current=Path('requirements.txt').read_bytes(); sys.exit(0 if marker.exists() and marker.read_bytes()==current else 1)" >>"%LOG_FILE%" 2>&1
+if not errorlevel 1 goto :dependencies_ready
+echo Installing or updating dependencies...
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :failed
+copy /y requirements.txt ".venv\requirements.installed" >nul
 
-start "" cmd /c "timeout /t 2 /nobreak >nul & start http://127.0.0.1:8788/"
-".venv\Scripts\python.exe" app.py
+:dependencies_ready
+".venv\Scripts\python.exe" -c "import tkinter, pyarrow; import archive_backup.desktop" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :failed
+if /i "%SMSI_ARCHIVE_PREFLIGHT_ONLY%"=="1" goto :preflight
+
+echo Starting the Windows desktop client...
+>>"%LOG_FILE%" echo [%date% %time%] Starting the native desktop client
+".venv\Scripts\python.exe" -m archive_backup.desktop >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :failed
 exit /b 0
 
+:preflight
+".venv\Scripts\python.exe" -m archive_backup.desktop --check >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto :failed
+>>"%LOG_FILE%" echo [%date% %time%] Environment check passed
+exit /b 0
+
+:python_missing
+echo Python 3.10 or newer is required. Install Python with PATH or Python Launcher enabled.
+>>"%LOG_FILE%" echo Python 3.10 or newer was not found
+goto :failed
+
 :failed
 echo.
-echo 启动失败，请查看上方错误。
+echo The client could not start. Error log:
+echo %LOG_FILE%
+echo.
+type "%LOG_FILE%"
 pause
 exit /b 1

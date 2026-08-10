@@ -29,15 +29,16 @@
 
 左侧“网盘文件”按采集服务器和日期读取 Google Drive 已发布 manifest；首次读取会把 manifest 的文件索引加载到当前页面，之后进入子目录或返回上级只在浏览器内存中切换，不重复访问网盘。“本地文件”直接浏览已验证目录和 `.partial` 暂存目录，即使网盘暂时不可用也能读取。两个列表只在进入页面、切换采集服务器或日期、手动重新读取时访问文件系统或网盘，不加入总览的周期刷新。
 
-“客户端更新”是独立页面。“检查更新”只读取 GitHub `main` 的提交信息；发现新版本后点击“开始更新”，页面显示下载阶段、字节进度、速度和预计剩余时间。更新包会先保存到状态目录并校验，不会替换正在运行的代码，也不会自动重启服务。归档任务空闲后点击“重启客户端”，Ubuntu 更新助手会再次检查没有下载或校验任务，再替换运行文件并重启 `smsi-archive-client.service`。更新助手只接受固定版本号和固定运行目录，不能执行任意命令。首次安装或更新助手变更时，仍需重新运行 `deploy/install_ubuntu.sh`。
+“客户端更新”是独立页面。“检查更新”只读取 GitHub `main` 的提交信息；发现新版本后点击“开始更新”，页面显示下载阶段、字节进度、速度和预计剩余时间。更新包会先保存到状态目录并校验，不会替换正在运行的代码，也不会自动重启服务。客户端空闲时“重启客户端”始终可用：有已校验更新时先切换版本，没有更新时只重启当前版本。Ubuntu 更新助手会再次检查没有下载或校验任务，运行中的归档任务不会被中断。更新助手只接受固定版本号和固定运行目录，不能执行任意命令。首次安装或更新助手变更时，仍需重新运行 `deploy/install_ubuntu.sh`。
 
 ## Windows
 
-1. 安装 Python 3.11 或更高版本。
-2. 运行 `Windows一键启动.cmd`，脚本会准备虚拟环境并在缺少时安装 rclone。
+1. 安装 Python 3.10 或更高版本。
+2. 运行 `Windows一键启动.cmd`（`启动客户端.cmd` 也是同一入口），脚本会准备虚拟环境并打开 Windows 原生桌面客户端；不启动 Web 服务，也不打开浏览器。Google Drive 来源缺少 rclone 时会尝试安装，Ubuntu 内网来源不依赖 rclone。
 3. 用 `rclone config` 创建只读 Google Drive remote。
-4. 再次运行 `Windows一键启动.cmd`，打开 `http://127.0.0.1:8788/`。
-5. 初始密码位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\initial-password.txt`。
+4. 再次运行 `Windows一键启动.cmd`，在“设置”中确认下载目录和采集服务器，然后从“文件浏览”选择日期下载。
+
+若启动失败，窗口会保留并显示错误，完整日志位于 `%LOCALAPPDATA%\SMSIArchiveBackupClient\windows-launcher.log`。
 
 Windows 从 Ubuntu 内网下载时，在来源中选择“Ubuntu 内网（SFTP）”，填写 Ubuntu 地址、私钥和独立的 `known_hosts` 文件。客户端仍会重新执行对象 SHA-256、Parquet schema、行数和业务内容摘要校验；Ubuntu 删除源文件不会删除 Windows 已验证副本。
 
