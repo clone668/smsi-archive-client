@@ -14,7 +14,7 @@ from werkzeug.security import generate_password_hash
 
 
 APP_NAME = "SMSIArchiveBackupClient"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 MIN_PASSWORD_LENGTH = 6
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
@@ -152,6 +152,45 @@ class ProfileConfig:
         )
 
 
+def ubuntu_default_profiles() -> list[ProfileConfig]:
+    return [
+        ProfileConfig(
+            profile_id="tencent-paper",
+            display_name="tencent-paper",
+            collector_id="tencent-paper",
+        ),
+        ProfileConfig(
+            profile_id="tencent-report",
+            display_name="tencent-report",
+            collector_id="tencent-report",
+        ),
+    ]
+
+
+def _migrate_config_payload(
+    value: Mapping[str, Any], *, ubuntu: bool | None = None
+) -> tuple[dict[str, Any], bool]:
+    payload = dict(value)
+    try:
+        version = int(payload.get("config_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version > CONFIG_VERSION:
+        return payload, False
+    changed = version < CONFIG_VERSION
+    if version < 2 and (os.name != "nt" if ubuntu is None else ubuntu):
+        profiles = [dict(item) for item in payload.get("profiles") or [] if isinstance(item, Mapping)]
+        used_ids = {str(item.get("profile_id") or "") for item in profiles}
+        used_collectors = {str(item.get("collector_id") or "") for item in profiles}
+        for profile in ubuntu_default_profiles():
+            if profile.profile_id in used_ids or profile.collector_id in used_collectors:
+                continue
+            profiles.append(asdict(profile))
+        payload["profiles"] = profiles
+    payload["config_version"] = CONFIG_VERSION
+    return payload, changed
+
+
 @dataclass
 class ClientConfig:
     config_version: int = CONFIG_VERSION
@@ -167,7 +206,9 @@ class ClientConfig:
     web_port: int = field(default_factory=default_web_port)
     password_hash: str = ""
     session_secret: str = ""
-    profiles: list[ProfileConfig] = field(default_factory=list)
+    profiles: list[ProfileConfig] = field(
+        default_factory=lambda: ubuntu_default_profiles() if os.name != "nt" else []
+    )
 
     @property
     def archive_root(self) -> Path:
@@ -252,14 +293,15 @@ class ConfigStore:
     def load(self) -> ClientConfig:
         if not self.path.exists():
             return self._create_default()
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
+        raw_payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(raw_payload, Mapping):
             raise RuntimeError("客户端配置格式无效")
+        payload, migrated = _migrate_config_payload(raw_payload)
         config = ClientConfig.from_mapping(payload)
         errors = config.validate()
         if errors:
             raise RuntimeError("客户端配置无效: " + "；".join(errors))
-        if not config.password_hash or not config.session_secret:
+        if migrated or not config.password_hash or not config.session_secret:
             config = self._ensure_security(config)
             self.save(config)
         return config

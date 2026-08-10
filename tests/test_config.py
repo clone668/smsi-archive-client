@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from archive_backup.config import ClientConfig, ConfigStore, ProfileConfig
+from archive_backup.config import (
+    CONFIG_VERSION,
+    ClientConfig,
+    ConfigStore,
+    ProfileConfig,
+    _migrate_config_payload,
+)
 
 
 def test_verified_source_must_not_overlap_destination(tmp_path) -> None:
@@ -56,3 +62,30 @@ def test_sftp_profile_builds_collector_root() -> None:
     )
     assert profile.validate() == []
     assert profile.sftp_archive_root == "/archive/collector=collector-a"
+
+
+def test_ubuntu_v1_config_adds_missing_default_collectors_once() -> None:
+    payload, changed = _migrate_config_payload(
+        {
+            "config_version": 1,
+            "profiles": [
+                {
+                    "profile_id": "tencent-paper",
+                    "display_name": "paper",
+                    "collector_id": "tencent-paper",
+                }
+            ],
+        },
+        ubuntu=True,
+    )
+
+    assert changed is True
+    assert payload["config_version"] == CONFIG_VERSION
+    assert [item["collector_id"] for item in payload["profiles"]] == [
+        "tencent-paper",
+        "tencent-report",
+    ]
+
+    migrated_again, changed_again = _migrate_config_payload(payload, ubuntu=True)
+    assert changed_again is False
+    assert len(migrated_again["profiles"]) == 2

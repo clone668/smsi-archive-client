@@ -26,6 +26,7 @@ def test_login_and_csrf_protection(tmp_path) -> None:
             headers={"X-CSRF-Token": bootstrap["csrf"]},
         )
         assert response.status_code == 200
+        assert response.get_json()["job"]["status"] == "queued"
     finally:
         app.extensions["smsi_archive_service"].stop()
 
@@ -130,5 +131,45 @@ def test_file_browser_endpoints_require_scope_and_return_inventory(
         assert dates["dates"][0]["archive_date"] == fixture["archive_date"]
         assert files["entry_count"] == 2
         assert files["entries"][0]["type"] == "directory"
+        assert files["download_eligible"] is True
+    finally:
+        app.extensions["smsi_archive_service"].stop()
+
+
+def test_download_endpoint_requires_csrf_and_queues_selected_date(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    try:
+        password = store.initial_password_path.read_text(encoding="utf-8").strip()
+        assert client.post("/login", data={"password": password}).status_code == 302
+        bootstrap = client.get("/api/bootstrap").get_json()
+        assert client.post(
+            "/api/actions/download",
+            json={"profile_id": "tencent-paper", "archive_date": "2026-08-09"},
+        ).status_code == 403
+        service = app.extensions["smsi_archive_service"]
+        service.request_download = lambda profile_id, archive_date: {
+            "id": 42,
+            "profile_id": profile_id,
+            "archive_date": archive_date,
+            "status": "queued",
+        }
+
+        response = client.post(
+            "/api/actions/download",
+            json={"profile_id": "tencent-paper", "archive_date": "2026-08-09"},
+            headers={"X-CSRF-Token": bootstrap["csrf"]},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["job"] == {
+            "id": 42,
+            "profile_id": "tencent-paper",
+            "archive_date": "2026-08-09",
+            "status": "queued",
+        }
     finally:
         app.extensions["smsi_archive_service"].stop()

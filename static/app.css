@@ -49,14 +49,18 @@ button { cursor: pointer; }
 
 .app-layout { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); }
 .sidebar { height: 100vh; padding: 18px 12px 12px; border-right: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; position: sticky; top: 0; z-index: 20; }
-.brand { min-height: 38px; padding: 0 8px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-.brand strong { color: var(--muted); font-weight: 600; }
+.brand { min-height: 42px; padding: 0 8px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+.brand > span:last-child { display: grid; line-height: 1.15; }
+.brand b { font-size: 14px; }
+.brand small { margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 600; }
 .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 7px; background: var(--brand); color: #fff; font-size: 21px; font-weight: 800; }
 .brand-mark.small { width: 29px; height: 29px; font-size: 15px; }
 .side-nav { margin-top: 24px; display: grid; gap: 4px; }
-.nav-item { min-height: 56px; padding: 8px 11px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; display: grid; align-content: center; gap: 1px; }
-.nav-item span { color: inherit; font-weight: 700; }
-.nav-item small { color: var(--muted); font-size: 11px; }
+.nav-item { min-height: 54px; padding: 7px 9px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 9px; }
+.nav-item > svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.nav-item > span { min-width: 0; display: grid; gap: 1px; color: inherit; }
+.nav-item b { font-size: 13px; }
+.nav-item small { color: var(--muted); font-size: 10px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item:hover { border-color: var(--line); background: var(--surface-2); color: var(--text); }
 .nav-item.active { border-color: color-mix(in srgb, var(--brand) 35%, var(--line)); background: var(--brand-soft); color: var(--brand-strong); }
 .nav-item.active small { color: var(--brand); }
@@ -141,8 +145,24 @@ tbody tr:hover { background: var(--surface-2); }
 .event-item.error strong { color: var(--bad); }
 .event-item.warning strong { color: var(--warn); }
 
-.browser-toolbar { min-height: 66px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); display: grid; grid-template-columns: minmax(240px, 1fr) auto; align-items: end; gap: 10px; }
+.task-focus .section-heading { background: var(--surface); }
+.task-progress-body { padding: 14px; }
+.task-progress-head { margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.task-progress-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.task-progress-head span { color: var(--muted); font-size: 12px; font-weight: 750; }
+.task-progress-meta { margin-top: 9px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px 20px; color: var(--muted); font-size: 11px; }
+#jobs-body td:first-child { font-weight: 700; }
+#jobs-body td:nth-child(2) { white-space: normal; min-width: 160px; }
+.job-cell { min-width: 150px; display: grid; gap: 2px; }
+.job-cell small { max-width: 280px; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+
+.browser-toolbar { min-height: 66px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); display: grid; grid-template-columns: minmax(240px, 360px) minmax(0, 1fr); align-items: end; gap: 10px; }
 .browser-toolbar label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.browser-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.browser-gate { min-height: 39px; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 12px; }
+.browser-gate.good { color: var(--good); background: var(--good-soft); }
+.browser-gate.warn { color: var(--warn); background: var(--warn-soft); }
+.browser-gate.bad { color: var(--bad); background: var(--bad-soft); }
 .browser-summary { min-height: 43px; padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--muted); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .browser-summary strong { color: var(--text); }
 .file-breadcrumbs { min-height: 38px; padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; gap: 6px; overflow-x: auto; white-space: nowrap; }
@@ -256,6 +276,9 @@ input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 2px va
   .brand strong { display: none; }
   .side-nav { margin: 0; display: flex; gap: 3px; overflow-x: auto; }
   .nav-item { min-width: max-content; min-height: 38px; padding: 6px 10px; text-align: center; display: block; }
+  .nav-item > svg { display: none; }
+  .nav-item > span { display: block; }
+  .nav-item b { font-size: 12px; }
   .nav-item small { display: none; }
   .sidebar-footer { margin: 0; padding: 0; border: 0; }
   .status-dot { display: none; }
@@ -269,7 +292,7 @@ input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 2px va
   .profile-fields { grid-template-columns: 1fr; }
   .profile-fields .wide-field { grid-column: auto; }
   .browser-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
-  .browser-toolbar .button { grid-column: auto; justify-self: start; }
+  .browser-actions { justify-content: flex-start; }
   .file-table-wrap { max-height: none; }
 }
 
@@ -278,7 +301,7 @@ input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 2px va
   .sidebar { grid-template-columns: 32px minmax(0, 1fr) auto; }
   .metric-grid { grid-template-columns: 1fr; }
   .browser-toolbar { grid-template-columns: 1fr; }
-  .browser-toolbar .button { grid-column: auto; }
+  .browser-actions { flex-wrap: wrap; }
   .update-step { grid-template-columns: 28px minmax(0, 1fr); }
   .update-step .button { grid-column: 2; margin-top: 7px; justify-self: start; }
 }

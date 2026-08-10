@@ -258,6 +258,44 @@ def test_cancel_marks_day_cancelled_and_keeps_staging(tmp_path, archive_fixture,
     assert not manager.final_root(profile, fixture["archive_date"]).exists()
 
 
+def test_cancel_specific_download_does_not_leave_day_running(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    source = CancelDuringDownloadSource(fixture, manager.cancel)
+    monkeypatch.setattr(
+        "archive_backup.manager.build_source", lambda _config, _profile: source
+    )
+
+    with pytest.raises(OperationCancelled):
+        manager.download_specific(profile.profile_id, fixture["archive_date"])
+
+    row = database.day(profile.profile_id, fixture["archive_date"])
+    assert row["status"] == "cancelled"
+    assert "下次可继续" in row["detail"]
+
+
+def test_cancel_recheck_restores_previous_verified_state(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    manager.cancel.set()
+
+    with pytest.raises(OperationCancelled):
+        manager.verify_existing(profile.profile_id, fixture["archive_date"])
+
+    row = database.day(profile.profile_id, fixture["archive_date"])
+    assert row["status"] == "verified"
+    assert "保留上次验证结果" in row["detail"]
+
+
 def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -> None:
     fixture = archive_fixture()
     config, profile = make_config(tmp_path, fixture["source_root"])
@@ -286,6 +324,69 @@ def test_remote_file_browser_uses_verified_manifest(tmp_path, archive_fixture) -
     assert nested["files"][0]["local_state"] == "missing"
 
 
+def test_remote_file_browser_blocks_running_archive(
+    tmp_path, monkeypatch
+) -> None:
+    config, profile = make_config(tmp_path, tmp_path / "source")
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(
+        "archive_backup.manager.build_source",
+        lambda _config, _profile: RunningSource(),
+    )
+
+    result = manager.browse_files(
+        profile.profile_id, "2026-08-07", scope="remote"
+    )
+
+    assert result["state"] == "remote_running"
+    assert result["download_eligible"] is False
+    assert result["browse_index"] == []
+
+
+def test_remote_file_browser_blocks_already_verified_day(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    manager.scan_profile(profile, download=True)
+
+    result = manager.browse_files(
+        profile.profile_id, fixture["archive_date"], scope="remote"
+    )
+
+    assert result["state"] == "verified"
+    assert result["download_eligible"] is False
+    assert result["download_block_reason"] == "本地归档已经完整验证"
+
+
+def test_remote_file_browser_surfaces_manifest_change(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    manager.scan_profile(profile, download=True)
+    changed = dict(fixture["manifest"])
+    changed["generated_at"] = "changed-after-local-verification"
+    changed_raw = json.dumps(
+        changed, sort_keys=True, separators=(",", ":")
+    ).encode()
+    (fixture["day_root"] / "manifest.json").write_bytes(changed_raw)
+    source_receipt_path = fixture["day_root"] / ".smsi-verified.json"
+    source_receipt = json.loads(source_receipt_path.read_text(encoding="utf-8"))
+    source_receipt["manifest_sha256"] = hashlib.sha256(changed_raw).hexdigest()
+    source_receipt_path.write_text(json.dumps(source_receipt), encoding="utf-8")
+
+    result = manager.browse_files(
+        profile.profile_id, fixture["archive_date"], scope="remote"
+    )
+
+    assert result["state"] == "manifest_changed"
+    assert result["download_eligible"] is False
+    assert "manifest 已变化" in result["download_block_reason"]
+
+
 def test_local_file_browser_does_not_access_remote(
     tmp_path, archive_fixture, monkeypatch
 ) -> None:
@@ -311,6 +412,10 @@ def test_local_file_browser_does_not_access_remote(
     assert dates["dates"][0]["partial"] is True
     assert result["entry_count"] == 2
     assert result["object_count"] == 1
+    assert any(
+        item["path"].endswith("part-00000.parquet.downloading")
+        for item in result["browse_index"]
+    )
     nested = manager.browse_files(
         profile.profile_id,
         fixture["archive_date"],

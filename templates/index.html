@@ -9,13 +9,14 @@
 <body>
   <div class="app-layout">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark small">S</span><span>SMSI</span><strong>归档备份</strong></div>
+      <div class="brand"><span class="brand-mark small">S</span><span><b>SMSI</b><small>归档中心 · v{{ client_version }}</small></span></div>
       <nav class="side-nav" aria-label="主导航">
-        <button class="nav-item active" data-page="overview"><span>总览</span><small>运行与归档状态</small></button>
-        <button class="nav-item" data-page="remote-files"><span>网盘文件</span><small>Google Drive 清单</small></button>
-        <button class="nav-item" data-page="local-files"><span>本地文件</span><small>已验证与暂存文件</small></button>
-        <button class="nav-item" data-page="updates"><span>客户端更新</span><small id="nav-update-state">检查版本</small></button>
-        <button class="nav-item" data-page="settings"><span>设置</span><small>来源与运行策略</small></button>
+        <button class="nav-item active" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>总览</b><small>归档与存储状态</small></span></button>
+        <button class="nav-item" data-page="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span><b>下载任务</b><small>进度与执行记录</small></span></button>
+        <button class="nav-item" data-page="remote-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z"/></svg><span><b>网盘文件</b><small>Google Drive</small></span></button>
+        <button class="nav-item" data-page="local-files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>本地归档</b><small>已验证与暂存</small></span></button>
+        <button class="nav-item" data-page="updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg><span><b>客户端更新</b><small id="nav-update-state">检查版本</small></span></button>
+        <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span><b>设置</b><small>来源与运行策略</small></span></button>
       </nav>
       <div class="sidebar-footer">
         <span id="connection-state" class="status-dot neutral">连接中</span>
@@ -39,6 +40,15 @@
           <article class="metric"><span>已验证日期</span><strong id="metric-verified">--</strong><small id="metric-latest">--</small></article>
           <article class="metric"><span>待处理</span><strong id="metric-pending">--</strong><small id="metric-errors">--</small></article>
           <article class="metric"><span>本地磁盘</span><strong id="metric-disk">--</strong><small id="metric-disk-detail">--</small></article>
+        </section>
+
+        <section id="overview-active-job" class="content-band task-focus">
+          <div class="section-heading"><div><h2 id="overview-job-title">当前任务</h2><p id="overview-job-detail">正在读取任务状态</p></div><span id="overview-job-state" class="state-pill">--</span></div>
+          <div class="task-progress-body">
+            <div class="task-progress-head"><strong id="overview-job-object">等待任务</strong><span id="overview-job-percent">--</span></div>
+            <div class="progress-track"><span id="overview-job-progress"></span></div>
+            <div class="task-progress-meta"><span id="overview-job-objects">对象 --</span><span id="overview-job-bytes">数据 --</span><span id="overview-job-speed">速度 --</span><span id="overview-job-eta">剩余 --</span><span id="overview-job-concurrency">并发 --</span><span id="overview-job-limit">限速 --</span></div>
+          </div>
         </section>
 
         <section class="content-band">
@@ -73,6 +83,25 @@
         </section>
       </section>
 
+      <section id="jobs-page" class="page">
+        <div class="page-heading">
+          <div><p class="eyebrow">TRANSFER QUEUE</p><h1>下载任务</h1><p class="page-description">任务进度写入状态库，客户端重启后可以继续处理暂存对象。</p></div>
+          <div class="heading-actions"><button id="jobs-cancel-task" class="button danger" disabled>取消当前任务</button></div>
+        </div>
+        <section class="content-band task-focus">
+          <div class="section-heading"><div><h2 id="jobs-active-title">当前没有运行任务</h2><p id="jobs-active-detail">等待自动检查或手动操作</p></div><span id="jobs-active-state" class="state-pill">空闲</span></div>
+          <div class="task-progress-body">
+            <div class="task-progress-head"><strong id="jobs-current-object">--</strong><span id="jobs-progress-percent">0%</span></div>
+            <div class="progress-track"><span id="jobs-progress-bar"></span></div>
+            <div class="task-progress-meta"><span id="jobs-progress-objects">对象 --</span><span id="jobs-progress-bytes">数据 --</span><span id="jobs-progress-speed">速度 --</span><span id="jobs-progress-eta">剩余 --</span><span id="jobs-progress-concurrency">并发 --</span><span id="jobs-progress-limit">限速 --</span></div>
+          </div>
+        </section>
+        <section class="content-band">
+          <div class="section-heading"><div><h2>最近任务</h2><p>扫描、下载、校验和取消结果</p></div><span id="jobs-count" class="count-badge">0</span></div>
+          <div class="table-wrap"><table><thead><tr><th>任务</th><th>采集服务器 / 日期</th><th>状态</th><th>进度</th><th>数据量</th><th>更新时间</th></tr></thead><tbody id="jobs-body"><tr><td colspan="6" class="empty-cell">暂无任务</td></tr></tbody></table></div>
+        </section>
+      </section>
+
       <section id="remote-files-page" class="page file-page" data-scope="remote">
         <div class="page-heading">
           <div><p class="eyebrow">GOOGLE DRIVE</p><h1>网盘文件</h1><p class="page-description">仅展示远端已发布 manifest 中的归档对象。</p></div>
@@ -80,14 +109,15 @@
         <section class="content-band file-browser">
           <div class="browser-toolbar">
             <label>采集服务器<select id="remote-profile"></select></label>
-            <button id="remote-refresh" class="button secondary">重新读取</button>
+            <div class="browser-actions"><button id="remote-download" class="button primary" disabled>下载此日期</button><button id="remote-refresh" class="button secondary">刷新</button></div>
           </div>
+          <div id="remote-gate" class="browser-gate">选择日期后检查下载资格。</div>
           <div id="remote-breadcrumbs" class="file-breadcrumbs" aria-label="网盘目录位置"></div>
           <div id="remote-summary" class="browser-summary">进入页面后读取网盘日期。</div>
           <div class="table-wrap file-table-wrap">
             <table class="file-table">
               <thead><tr><th>名称</th><th>类型 / 数据表</th><th>大小</th><th>行数</th><th>本地状态</th><th>状态 / 摘要</th></tr></thead>
-              <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器和归档日期</td></tr></tbody>
+              <tbody id="remote-files-body"><tr><td colspan="6" class="empty-cell">请选择采集服务器</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -100,14 +130,14 @@
         <section class="content-band file-browser">
           <div class="browser-toolbar">
             <label>采集服务器<select id="local-profile"></select></label>
-            <button id="local-refresh" class="button secondary">重新读取</button>
+            <div class="browser-actions"><button id="local-refresh" class="button secondary">刷新</button></div>
           </div>
           <div id="local-breadcrumbs" class="file-breadcrumbs" aria-label="本地目录位置"></div>
           <div id="local-summary" class="browser-summary">进入页面后读取本地日期。</div>
           <div class="table-wrap file-table-wrap">
             <table class="file-table">
               <thead><tr><th>名称</th><th>位置</th><th>大小</th><th>网盘清单</th><th>修改时间</th></tr></thead>
-              <tbody id="local-files-body"><tr><td colspan="5" class="empty-cell">请选择采集服务器和归档日期</td></tr></tbody>
+              <tbody id="local-files-body"><tr><td colspan="5" class="empty-cell">请选择采集服务器</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -115,7 +145,7 @@
 
       <section id="updates-page" class="page">
         <div class="page-heading">
-          <div><p class="eyebrow">CLIENT MAINTENANCE</p><h1>客户端更新</h1><p class="page-description">更新包先下载并校验，只有手动重启后才切换运行版本。</p></div>
+          <div><p class="eyebrow">CLIENT MAINTENANCE</p><h1>客户端更新</h1><p class="page-description">更新包先下载并校验；客户端空闲时也可按需重启当前版本。</p></div>
         </div>
 
         <section class="update-version-grid">
@@ -130,7 +160,7 @@
           <div class="update-actions" aria-label="客户端更新操作">
             <div class="update-step"><span class="step-number">1</span><div><strong>检查版本</strong><small>只读取 GitHub 版本信息</small></div><button id="check-update" class="button secondary">检查更新</button></div>
             <div class="update-step"><span class="step-number">2</span><div><strong>下载并校验</strong><small>不会替换正在运行的代码</small></div><button id="download-update" class="button primary" disabled>开始更新</button></div>
-            <div class="update-step"><span class="step-number">3</span><div><strong>切换并重启</strong><small id="restart-hint">更新准备完成后启用</small></div><button id="restart-update" class="button secondary" disabled>重启客户端</button></div>
+            <div class="update-step"><span class="step-number">3</span><div><strong>重启客户端</strong><small id="restart-hint">空闲时可按需重启</small></div><button id="restart-update" class="button secondary" disabled>重启客户端</button></div>
           </div>
           <div id="update-progress" class="update-progress" aria-live="polite">
             <div class="update-progress-head"><span id="update-phase">等待操作</span><strong id="update-percent">--</strong></div>

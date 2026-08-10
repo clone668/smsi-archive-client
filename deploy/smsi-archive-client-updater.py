@@ -130,17 +130,11 @@ def _handle(payload: dict[str, object]) -> dict[str, object]:
     if action == "restart":
         if _busy():
             raise RuntimeError("归档任务正在运行，请完成后再重启客户端")
-        latest_file = STATE_DIR / ".updates" / "latest.json"
+        revision = str(payload.get("revision") or "").strip().lower()
         activated = False
-        if latest_file.is_file():
-            try:
-                latest = json.loads(latest_file.read_text(encoding="utf-8"))
-                revision = str(latest.get("revision") or "")
-            except (OSError, ValueError):
-                revision = ""
-            if revision and (STATE_DIR / ".updates" / revision).is_dir():
-                _activate(revision)
-                activated = True
+        if revision:
+            _activate(revision)
+            activated = True
         subprocess.run(["systemctl", "restart", SERVICE], check=True, timeout=30)
         return {"ok": True, "restarted": True, "activated": activated}
     raise RuntimeError("不支持的更新操作")

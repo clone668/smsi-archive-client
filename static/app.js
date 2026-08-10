@@ -1,11 +1,11 @@
 (() => {
   "use strict";
   const state = {
-    csrf: "", config: null, runtime: null, updates: null, days: [], comparisons: [], events: [],
+    csrf: "", config: null, runtime: null, updates: null, days: [], jobs: [], comparisons: [], events: [],
     timer: null, updateTimer: null,
     fileBrowsers: {
-      remote: { request: 0, path: "", date: "", dates: [], index: null, meta: null },
-      local: { request: 0, path: "", date: "", dates: [] },
+      remote: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null },
+      local: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null },
     },
   };
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -36,7 +36,7 @@
     verified: ["恢复验证通过", "good"], downloading: ["下载中", "warn"], verifying: ["校验中", "warn"],
     ready: ["可下载", "warn"], remote_running: ["远端归档中", "warn"], waiting_manifest: ["等待发布", "warn"],
     remote_failed: ["远端失败", "bad"], error: ["处理失败", "bad"], manifest_changed: ["清单已变化", "bad"],
-    cancelled: ["已取消", "warn"],
+    cancelled: ["已取消", "warn"], interrupted: ["等待恢复", "warn"],
     unknown: ["未知", ""],
   };
   const updatePhaseMap = {
@@ -68,13 +68,24 @@
     return payload;
   }
 
+  function activeJob() {
+    return state.runtime?.current_job
+      || state.jobs.find(item => ["queued", "running", "cancelling"].includes(item.status))
+      || null;
+  }
+
+  function taskBusy() {
+    return !!state.runtime?.running || !!state.runtime?.pending || !!activeJob();
+  }
+
   function renderMetrics() {
     const runtime = state.runtime || {};
+    const currentJob = activeJob();
     const verified = state.days.filter(item => item.status === "verified");
     const bad = state.days.filter(item => ["error", "remote_failed", "manifest_changed"].includes(item.status));
     const pending = state.days.filter(item => !["verified", "error", "remote_failed", "manifest_changed"].includes(item.status));
-    $("#metric-runtime").textContent = runtime.running ? "执行中" : (runtime.auto_download ? "自动运行" : "已暂停");
-    $("#metric-runtime-detail").textContent = runtime.running ? runtime.detail : `下次检查 ${timeText(runtime.next_scan_at)}`;
+    $("#metric-runtime").textContent = runtime.running ? "执行中" : currentJob ? "排队中" : (runtime.auto_download ? "自动运行" : "已暂停");
+    $("#metric-runtime-detail").textContent = runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
     $("#metric-verified").textContent = String(verified.length);
     $("#metric-latest").textContent = verified.length ? `最新 ${verified.map(item => item.archive_date).sort().at(-1)}` : "尚无本地归档";
     $("#metric-pending").textContent = String(pending.length);
@@ -85,9 +96,90 @@
     $("#metric-disk-detail").textContent = runtime.disk_error || `可用 ${bytes(disk.free)} / ${bytes(disk.total)}`;
     $("#connection-state").textContent = runtime.running ? "任务执行中" : "客户端在线";
     $("#connection-state").className = "status-dot good";
-    $("#cancel-task").classList.toggle("hidden", !runtime.running);
-    $("#scan-only").disabled = !!runtime.running || !!runtime.pending;
-    $("#scan-download").disabled = !!runtime.running || !!runtime.pending;
+    $("#cancel-task").classList.toggle("hidden", !activeJob());
+    $("#scan-only").disabled = taskBusy();
+    $("#scan-download").disabled = taskBusy();
+  }
+
+  const jobStatusMap = {
+    queued: ["排队中", "warn"], running: ["执行中", "warn"], cancelling: ["正在取消", "warn"],
+    recovering: ["等待恢复", "warn"], completed: ["已完成", "good"], cancelled: ["已取消", "warn"],
+    failed: ["失败", "bad"],
+  };
+
+  function jobLabel(job) {
+    return ({ scan: "检查网盘", scan_download: "自动同步", download: "指定日期下载", verify: "重新校验" }[job?.action] || job?.action || "任务");
+  }
+
+  function progressValues(job, progress) {
+    const value = progress && Object.keys(progress).length ? progress : job || {};
+    const total = Number(value.bytes_total || 0);
+    const done = Number(value.bytes_transferred ?? value.bytes_done ?? 0);
+    const objects = Number(value.object_count || 0);
+    const objectsDone = Number(value.objects_done || 0);
+    const percent = total ? Math.max(0, Math.min(100, done / total * 100)) : objects ? Math.max(0, Math.min(100, objectsDone / objects * 100)) : 0;
+    return { value, total, done, objects, objectsDone, percent };
+  }
+
+  function renderTaskPanel(prefix, job, progress) {
+    const values = progressValues(job, progress);
+    const live = values.value;
+    const active = job && ["queued", "running", "cancelling"].includes(job.status);
+    const [label, tone] = job
+      ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
+      : ["空闲", ""];
+    if (prefix === "overview-job") {
+      $("#overview-job-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
+      $("#overview-job-detail").textContent = job
+        ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : progress.phase === "downloading" ? "正在下载并校验对象" : job.detail || "等待后台任务")
+        : "自动检查会在计划时间运行";
+      $("#overview-job-state").textContent = label;
+      $("#overview-job-state").className = `state-pill ${tone}`;
+      $("#overview-job-object").textContent = live.current_object ? live.current_object.split("/").at(-1) : (job?.archive_date || "等待任务");
+      $("#overview-job-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "--";
+      $("#overview-job-progress").style.width = `${values.percent}%`;
+      $("#overview-job-objects").textContent = `对象 ${values.objectsDone}/${values.objects || "--"}`;
+      $("#overview-job-bytes").textContent = `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
+      $("#overview-job-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
+      $("#overview-job-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
+      $("#overview-job-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
+      $("#overview-job-limit").textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
+      return;
+    }
+    $("#jobs-active-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
+    $("#jobs-active-detail").textContent = job
+      ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.current_object || job.detail || "等待后台任务")
+      : "等待自动检查或手动操作";
+    $("#jobs-active-state").textContent = label;
+    $("#jobs-active-state").className = `state-pill ${tone}`;
+    $("#jobs-current-object").textContent = live.current_object || job?.archive_date || "--";
+    $("#jobs-progress-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "0%";
+    $("#jobs-progress-bar").style.width = `${values.percent}%`;
+    $("#jobs-progress-objects").textContent = `对象 ${values.objectsDone}/${values.objects || "--"}`;
+    $("#jobs-progress-bytes").textContent = `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
+    $("#jobs-progress-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
+    $("#jobs-progress-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
+    $("#jobs-progress-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
+    $("#jobs-progress-limit").textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
+    $("#jobs-cancel-task").disabled = !active;
+  }
+
+  function renderJobs() {
+    const active = activeJob();
+    const progress = state.runtime?.running ? state.runtime?.progress || {} : {};
+    renderTaskPanel("overview-job", active, progress);
+    renderTaskPanel("jobs", active, progress);
+    $("#jobs-count").textContent = String(state.jobs.length);
+    const body = $("#jobs-body");
+    if (!state.jobs.length) { body.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无任务</td></tr>'; return; }
+    const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
+    body.innerHTML = state.jobs.map(job => {
+      const [label, tone] = job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""];
+      const values = progressValues(job, job.id === active?.id ? progress : {});
+      const location = [profiles[job.profile_id] || job.profile_id, job.archive_date].filter(Boolean).join(" · ") || "全部采集服务器";
+      const detail = job.error || job.detail || "";
+      return `<tr><td><div class="job-cell"><strong>${escapeHtml(jobLabel(job))}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></div></td><td>${escapeHtml(location)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${values.objects ? `${values.objectsDone}/${values.objects}` : "--"}</td><td>${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}</td><td>${timeText(job.updated_at)}</td></tr>`;
+    }).join("");
   }
 
   function renderProfiles() {
@@ -126,7 +218,7 @@
       const detailText = liveDetail || item.error || item.detail || "";
       const dataText = objectCount ? `${bytesDone ? bytes(bytesDone) : "0 B"} / ${bytes(bytesTotal)}` : bytes(bytesTotal);
       const statusDetail = liveDetail ? `<small class="row-progress-detail">${escapeHtml(liveDetail)}</small>` : "";
-      const action = `${item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">重新校验</button>` : ""}<button class="button small quiet day-detail-toggle" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">文件详情</button>`;
+      const action = `${item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}" ${taskBusy() ? "disabled" : ""}>重新校验</button>` : ""}<button class="button small quiet day-detail-toggle" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">文件详情</button>`;
       return `<tr title="${escapeHtml(detailText)}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span>${statusDetail}</td><td>${objectsDone}/${objectCount}</td><td>${dataText}</td><td>${timeText(item.updated_at)}</td><td class="row-actions">${action}</td></tr><tr class="day-detail-row hidden"><td colspan="7"><div class="day-detail-content"></div></td></tr>`;
     }).join("");
     $$(".verify-day", body).forEach(button => button.addEventListener("click", () => verifyDay(button.dataset.profile, button.dataset.date)));
@@ -199,7 +291,15 @@
     root.innerHTML = state.events.map(item => `<article class="event-item ${escapeHtml(item.level)}"><header><strong>${escapeHtml(item.event)}</strong><time>${timeText(item.created_at)}</time></header><p>${escapeHtml([item.profile_id, item.archive_date, item.detail].filter(Boolean).join(" · ") || "--")}</p></article>`).join("");
   }
 
-  function renderAll() { renderMetrics(); renderProfiles(); renderComparisons(); renderDays(); renderEvents(); }
+  function renderAll() {
+    renderMetrics();
+    renderProfiles();
+    renderComparisons();
+    renderDays();
+    renderEvents();
+    renderJobs();
+    updateRemoteDownloadAction();
+  }
 
   function renderUpdates() {
     const updates = state.updates || {};
@@ -246,9 +346,9 @@
     $("#nav-update-state").textContent = label;
     $("#check-update").disabled = active;
     $("#download-update").disabled = active || !updates.update_available || !!staged;
-    $("#restart-update").disabled = active || !staged || archiveBusy || !updates.helper_available;
+    $("#restart-update").disabled = active || archiveBusy || !updates.helper_available;
     const blockedReason = $("#update-blocked-reason");
-    if (staged && archiveBusy) {
+    if (archiveBusy) {
       const progress = state.runtime?.progress || {};
       const archivePhase = archivePhaseMap[progress.phase] || "归档任务正在运行";
       const objects = progress.object_count ? ` · ${Number(progress.objects_done || 0)}/${Number(progress.object_count)} 个对象` : "";
@@ -259,20 +359,20 @@
       blockedReason.textContent = "更新包已下载并校验，可以重启客户端。";
       blockedReason.className = "workflow-notice good";
       $("#restart-update").title = "切换已校验的更新包并重启客户端";
-    } else if (staged && !updates.helper_available) {
+    } else if (!updates.helper_available) {
       blockedReason.textContent = "更新助手不可用，暂时不能切换版本。";
       blockedReason.className = "workflow-notice bad";
       $("#restart-update").title = "更新助手不可用";
     } else {
-      blockedReason.textContent = "";
-      blockedReason.className = "workflow-notice hidden";
-      $("#restart-update").title = "";
+      blockedReason.textContent = "客户端当前空闲，可以按需重启当前版本。";
+      blockedReason.className = "workflow-notice";
+      $("#restart-update").title = "重启当前运行版本";
     }
     $("#restart-hint").textContent = !updates.helper_available
       ? "Ubuntu 更新助手不可用"
-      : archiveBusy && staged
+      : archiveBusy
         ? "归档任务结束后可重启"
-        : staged ? "更新已准备，可以安全切换" : "更新准备完成后启用";
+        : staged ? "更新已准备，可以安全切换" : "空闲时可按需重启";
 
     const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
     const track = $("#update-progress-track");
@@ -344,10 +444,12 @@
 
   async function restartUpdate() {
     const button = $("#restart-update");
-    const targetRevision = state.updates?.staged_revision;
-    if (!targetRevision) return toast("没有已准备好的更新包", true);
+    const targetRevision = state.updates?.staged_revision || state.updates?.current_revision || "";
+    const activatesUpdate = !!state.updates?.staged_revision;
     button.disabled = true;
-    $("#update-detail").textContent = "正在重启客户端，等待新版本上线...";
+    $("#update-detail").textContent = activatesUpdate
+      ? "正在切换更新并重启客户端，等待新版本上线..."
+      : "正在重启客户端，等待服务恢复...";
     $("#update-detail").className = "update-detail";
     try {
       await api("/api/update/restart", { method: "POST", body: "{}" });
@@ -371,7 +473,7 @@
         const response = await fetch("/api/update/status", { credentials: "same-origin", cache: "no-store" });
         if (response.ok) {
           const payload = await response.json();
-          if (payload.updates?.current_revision === targetRevision) {
+          if (!targetRevision || payload.updates?.current_revision === targetRevision) {
             window.location.reload();
             return;
           }
@@ -406,20 +508,42 @@
     $(`#${scope}-breadcrumbs`).innerHTML = "";
     state.fileBrowsers[scope].date = "";
     state.fileBrowsers[scope].dates = [];
+    state.fileBrowsers[scope].index = null;
+    state.fileBrowsers[scope].meta = null;
     $(`#${scope}-summary`).textContent = message;
+    if (scope === "remote") {
+      $("#remote-download").disabled = true;
+      $("#remote-gate").textContent = message;
+      $("#remote-gate").className = "browser-gate";
+    }
     const columns = scope === "remote" ? 6 : 5;
     $(`#${scope}-files-body`).innerHTML = `<tr><td colspan="${columns}" class="empty-cell">${escapeHtml(message)}</td></tr>`;
   }
 
-  async function loadFileDates(scope) {
+  async function loadFileDates(scope, force = false) {
     const profileId = $(`#${scope}-profile`).value;
     if (!profileId) return clearFileBrowser(scope, "请先在设置中添加采集服务器");
-    const request = ++state.fileBrowsers[scope].request;
-    state.fileBrowsers[scope].path = "";
-    if (scope === "remote") {
-      state.fileBrowsers.remote.index = null;
-      state.fileBrowsers.remote.meta = null;
+    const browserState = state.fileBrowsers[scope];
+    if (!force && browserState.loadedProfile === profileId && browserState.dates.length) {
+      if (
+        browserState.date
+        && browserState.index
+        && browserState.meta?.profile_id === profileId
+        && browserState.meta?.archive_date === browserState.date
+      ) {
+        renderCachedIndex(scope, browserState.path || "");
+      } else {
+        renderDateList(scope, browserState.dates);
+      }
+      return;
     }
+    const previousDate = force ? browserState.date : "";
+    const previousPath = force ? browserState.path : "";
+    const request = ++state.fileBrowsers[scope].request;
+    browserState.loadedProfile = "";
+    browserState.path = "";
+    browserState.index = null;
+    browserState.meta = null;
     clearFileBrowser(scope, scope === "remote" ? "正在读取网盘日期..." : "正在读取本地日期...");
     try {
       const query = new URLSearchParams({ profile_id: profileId, scope });
@@ -427,7 +551,13 @@
       if (request !== state.fileBrowsers[scope].request) return;
       const dates = payload.result.dates || [];
       state.fileBrowsers[scope].dates = dates;
+      state.fileBrowsers[scope].loadedProfile = profileId;
       if (!dates.length) return clearFileBrowser(scope, scope === "remote" ? "网盘中没有可浏览的归档日期" : "本地没有正式或暂存归档目录");
+      if (previousDate && dates.some(item => item.archive_date === previousDate)) {
+        state.fileBrowsers[scope].date = previousDate;
+        await loadFileList(scope, previousPath);
+        return;
+      }
       renderDateList(scope, dates);
     } catch (error) {
       if (request !== state.fileBrowsers[scope].request) return;
@@ -442,13 +572,12 @@
     const path = requestedPath === null ? state.fileBrowsers[scope].path : requestedPath;
     state.fileBrowsers[scope].path = path || "";
     if (
-      scope === "remote"
-      && requestedPath !== null
-      && state.fileBrowsers.remote.index
-      && state.fileBrowsers.remote.meta?.profile_id === profileId
-      && state.fileBrowsers.remote.meta?.archive_date === archiveDate
+      requestedPath !== null
+      && state.fileBrowsers[scope].index
+      && state.fileBrowsers[scope].meta?.profile_id === profileId
+      && state.fileBrowsers[scope].meta?.archive_date === archiveDate
     ) {
-      renderRemoteIndex(path || "");
+      renderCachedIndex(scope, path || "");
       return;
     }
     const request = ++state.fileBrowsers[scope].request;
@@ -461,13 +590,16 @@
       if (path) query.set("path", path);
       const payload = await api(`/api/files/list?${query}`);
       if (request !== state.fileBrowsers[scope].request) return;
-      if (scope === "remote" && payload.result.browse_index) {
-        state.fileBrowsers.remote.index = payload.result.browse_index;
-        state.fileBrowsers.remote.meta = {
+      if (payload.result.browse_index) {
+        state.fileBrowsers[scope].index = payload.result.browse_index;
+        state.fileBrowsers[scope].meta = {
           profile_id: profileId,
           archive_date: archiveDate,
           state: payload.result.state,
           detail: payload.result.detail,
+          download_eligible: !!payload.result.download_eligible,
+          download_block_reason: payload.result.download_block_reason || "",
+          manifest_sha256: payload.result.manifest_sha256 || "",
         };
       }
       renderFileList(scope, payload.result);
@@ -483,8 +615,9 @@
     browserState.date = "";
     browserState.path = "";
     if (scope === "remote") {
-      browserState.index = null;
-      browserState.meta = null;
+      $("#remote-download").disabled = true;
+      $("#remote-gate").textContent = "选择日期后检查下载资格。";
+      $("#remote-gate").className = "browser-gate";
     }
     renderFileBreadcrumbs(scope, "", "", "");
     $(`#${scope}-summary`).innerHTML = `<span><strong>归档根目录</strong></span><span>${dates.length} 个日期</span><span>点击日期文件夹进入</span>`;
@@ -496,7 +629,9 @@
     }
     if (scope === "remote") {
       body.innerHTML = dates.map(item => {
-        const stateInfo = statusMap[item.status] || [item.remote ? "可读取" : "未知", item.remote ? "good" : ""];
+        const stateInfo = item.status === "unknown" && item.remote
+          ? ["待检查", ""]
+          : statusMap[item.status] || [item.remote ? "可读取" : "未知", item.remote ? "good" : ""];
         const localInfo = item.local ? ["本地已存在", "good"] : item.partial ? ["暂存中", "warn"] : ["未下载", ""];
         return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>归档日期</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>归档日期</td><td>${bytes(item.bytes_total)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${localInfo[1]}">${localInfo[0]}</span></td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td></tr>`;
       }).join("");
@@ -516,8 +651,8 @@
     loadFileList(scope, "");
   }
 
-  function renderRemoteIndex(path) {
-    const browserState = state.fileBrowsers.remote;
+  function renderCachedIndex(scope, path) {
+    const browserState = state.fileBrowsers[scope];
     const entries = {};
     for (const item of browserState.index || []) {
       const relative = String(item.path || "");
@@ -539,8 +674,8 @@
       return directoryOrder || String(left.name).localeCompare(String(right.name));
     });
     const files = ordered.filter(item => item.type === "file");
-    renderFileList("remote", {
-      scope: "remote",
+    renderFileList(scope, {
+      scope,
       profile_id: browserState.meta.profile_id,
       archive_date: browserState.meta.archive_date,
       path,
@@ -552,7 +687,33 @@
       bytes_total: files.reduce((total, item) => total + Number(item.size_bytes || 0), 0),
       row_count: files.reduce((total, item) => total + Number(item.row_count || 0), 0),
       entries: ordered,
+      download_eligible: browserState.meta.download_eligible,
+      download_block_reason: browserState.meta.download_block_reason,
     });
+  }
+
+  function updateRemoteDownloadAction(result = state.fileBrowsers.remote.meta) {
+    const button = $("#remote-download");
+    const gate = $("#remote-gate");
+    if (!result || !state.fileBrowsers.remote.date) {
+      button.disabled = true;
+      return;
+    }
+    const busy = taskBusy();
+    const profileId = $("#remote-profile").value;
+    const archiveDate = state.fileBrowsers.remote.date;
+    const day = state.days.find(item => item.profile_id === profileId && item.archive_date === archiveDate);
+    const localVerified = day?.status === "verified";
+    const localBlocked = ["manifest_changed", "remote_failed", "error"].includes(day?.status);
+    const eligible = !!result.download_eligible && !busy && !localVerified && !localBlocked;
+    let reason = result.download_block_reason
+      || (result.state === "ready" ? "远端归档已验证，可以下载" : result.detail || "当前日期还不能下载");
+    if (localBlocked) reason = day.error || day.detail || "当前归档状态异常，请先处理。";
+    if (localVerified) reason = "本地归档已经完整验证。";
+    if (busy) reason = "已有任务正在执行或排队，请等待完成后再下载。";
+    gate.textContent = eligible ? "远端归档已验证，可以下载到 Ubuntu 本地归档。" : reason;
+    gate.className = `browser-gate ${eligible ? "good" : localBlocked || ["remote_failed", "manifest_changed"].includes(result.state) ? "bad" : "warn"}`;
+    button.disabled = !eligible;
   }
 
   function renderFileList(scope, result) {
@@ -561,6 +722,9 @@
     state.fileBrowsers[scope].path = result.path || "";
     const [stateLabel, stateTone] = statusMap[result.state] || [result.state || "未知", ""];
     renderFileBreadcrumbs(scope, result.path || "", result.parent_path || "", result.archive_date || state.fileBrowsers[scope].date);
+    if (scope === "remote") {
+      updateRemoteDownloadAction(result);
+    }
     $(`#${scope}-summary`).innerHTML = `<span><strong>${escapeHtml(result.archive_date)}</strong></span><span>${Number(result.entry_count || 0)} 项</span><span>${bytes(result.bytes_total)}</span>${Number(result.row_count || 0) ? `<span>${Number(result.row_count).toLocaleString("zh-CN")} 行</span>` : ""}<span class="state-text ${stateTone}">${escapeHtml(stateLabel)}</span><span>${escapeHtml(result.detail || "")}</span>`;
     const body = $(`#${scope}-files-body`);
     if (!entries.length) {
@@ -600,7 +764,10 @@
     $$(".root-breadcrumb", root).forEach(button => button.addEventListener("click", () => {
       if (archiveDate) renderDateList(scope, state.fileBrowsers[scope].dates);
     }));
-    $$(".date-breadcrumb", root).forEach(button => button.addEventListener("click", () => renderDateList(scope, state.fileBrowsers[scope].dates)));
+    $$(".date-breadcrumb", root).forEach(button => button.addEventListener("click", () => loadFileList(scope, "")));
+    $$(".breadcrumb[data-path]", root).filter(button => !button.classList.contains("root-breadcrumb")).forEach(button => {
+      button.addEventListener("click", () => loadFileList(scope, button.dataset.path || ""));
+    });
     if (path && parentPath === path) root.dataset.invalid = "true";
   }
 
@@ -686,8 +853,14 @@
       state.config = result.config;
       populateSettings();
       renderFileProfileOptions();
-      state.fileBrowsers.remote.request += 1;
-      state.fileBrowsers.local.request += 1;
+      for (const scope of ["remote", "local"]) {
+        state.fileBrowsers[scope].request += 1;
+        state.fileBrowsers[scope].loadedProfile = "";
+        state.fileBrowsers[scope].date = "";
+        state.fileBrowsers[scope].dates = [];
+        state.fileBrowsers[scope].index = null;
+        state.fileBrowsers[scope].meta = null;
+      }
       toast("设置已保存");
     }
     catch (error) { toast(error.message, true); }
@@ -698,6 +871,17 @@
     catch (error) { toast(error.message, true); }
   }
 
+  async function downloadDate() {
+    const profileId = $("#remote-profile").value;
+    const archiveDate = state.fileBrowsers.remote.date;
+    if (!profileId || !archiveDate) return toast("请先选择归档日期", true);
+    try {
+      await api("/api/actions/download", { method: "POST", body: JSON.stringify({ profile_id: profileId, archive_date: archiveDate }) });
+      toast(`${archiveDate} 已加入下载队列`);
+      await refresh();
+    } catch (error) { toast(error.message, true); }
+  }
+
   async function verifyDay(profile_id, archive_date) {
     try { await api("/api/actions/verify", { method: "POST", body: JSON.stringify({ profile_id, archive_date }) }); toast(`${archive_date} 已加入重新校验队列`); await refresh(); }
     catch (error) { toast(error.message, true); }
@@ -706,7 +890,7 @@
   async function refresh() {
     try {
       const result = await api("/api/status");
-      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.comparisons = result.comparisons || []; state.events = result.events; renderAll(); renderUpdates();
+      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events; renderAll(); renderUpdates();
     } catch (error) {
       $("#connection-state").textContent = "连接中断"; $("#connection-state").className = "status-dot bad";
     }
@@ -714,7 +898,7 @@
 
   async function bootstrap() {
     const result = await api("/api/bootstrap");
-    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.comparisons = result.comparisons || []; state.events = result.events;
+    state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events;
     renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);
@@ -723,17 +907,31 @@
   $$(".nav-item").forEach(button => button.addEventListener("click", () => {
     $$(".nav-item").forEach(item => item.classList.toggle("active", item === button));
     $$(".page").forEach(page => page.classList.toggle("active", page.id === `${button.dataset.page}-page`));
+    if (button.dataset.page === "jobs") renderJobs();
     if (button.dataset.page === "remote-files") loadFileDates("remote");
     if (button.dataset.page === "local-files") loadFileDates("local");
     if (button.dataset.page === "updates") pollUpdateStatus();
   }));
   for (const scope of ["remote", "local"]) {
-    $(`#${scope}-profile`).addEventListener("change", () => loadFileDates(scope));
-    $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope));
+    $(`#${scope}-profile`).addEventListener("change", () => {
+      state.fileBrowsers[scope].loadedProfile = "";
+      clearFileBrowser(scope, "正在切换采集服务器...");
+      loadFileDates(scope);
+    });
+    $(`#${scope}-refresh`).addEventListener("click", () => loadFileDates(scope, true));
   }
   $("#scan-only").addEventListener("click", () => runScan(false));
   $("#scan-download").addEventListener("click", () => runScan(true));
-  $("#cancel-task").addEventListener("click", async () => { try { await api("/api/actions/cancel", { method: "POST", body: "{}" }); toast("已请求取消任务"); } catch (error) { toast(error.message, true); } });
+  const cancelTask = async () => {
+    try {
+      await api("/api/actions/cancel", { method: "POST", body: "{}" });
+      toast("已请求取消任务");
+      await refresh();
+    } catch (error) { toast(error.message, true); }
+  };
+  $("#cancel-task").addEventListener("click", cancelTask);
+  $("#jobs-cancel-task").addEventListener("click", cancelTask);
+  $("#remote-download").addEventListener("click", downloadDate);
   $("#check-update").addEventListener("click", checkUpdate);
   $("#download-update").addEventListener("click", downloadUpdate);
   $("#restart-update").addEventListener("click", restartUpdate);

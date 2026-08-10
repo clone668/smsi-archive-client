@@ -93,3 +93,34 @@ def test_failed_update_releases_operation_lock(tmp_path, monkeypatch) -> None:
         lambda _url: {"sha": "b" * 40, "commit": {}},
     )
     assert manager.check()["operation"]["active"] is False
+
+
+def test_restart_without_staged_update_restarts_current_version(tmp_path, monkeypatch) -> None:
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    manager = UpdateManager(tmp_path / "state", app_root, helper_socket=str(tmp_path / "helper.sock"))
+    requests = []
+    monkeypatch.setattr(manager, "_helper_request", lambda payload: requests.append(payload) or {"ok": True})
+
+    assert manager.restart() == {"ok": True}
+    assert requests == [{"action": "restart", "revision": ""}]
+
+
+def test_restart_activates_only_staged_revision(tmp_path, monkeypatch) -> None:
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    current = "a" * 40
+    staged = "b" * 40
+    (app_root / ".smsi-release").write_text(current, encoding="ascii")
+    manager = UpdateManager(tmp_path / "state", app_root, helper_socket=str(tmp_path / "helper.sock"))
+    manager.update_root.mkdir(parents=True)
+    manager.metadata_path.write_text(
+        '{"revision":"' + staged + '"}', encoding="utf-8"
+    )
+    (manager.update_root / staged).mkdir()
+    requests = []
+    monkeypatch.setattr(manager, "_helper_request", lambda payload: requests.append(payload) or {"ok": True})
+
+    manager.restart()
+
+    assert requests == [{"action": "restart", "revision": staged}]

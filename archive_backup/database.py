@@ -75,7 +75,294 @@ class StateDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_archive_comparisons_date
                     ON archive_comparisons(archive_date DESC, pair_id);
+                CREATE TABLE IF NOT EXISTS archive_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    requested_by TEXT NOT NULL DEFAULT 'manual',
+                    profile_id TEXT NOT NULL DEFAULT '',
+                    archive_date TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    phase TEXT NOT NULL DEFAULT 'queued',
+                    manifest_sha256 TEXT NOT NULL DEFAULT '',
+                    object_count INTEGER NOT NULL DEFAULT 0,
+                    objects_done INTEGER NOT NULL DEFAULT 0,
+                    bytes_total INTEGER NOT NULL DEFAULT 0,
+                    bytes_done INTEGER NOT NULL DEFAULT 0,
+                    speed_bytes_per_second INTEGER NOT NULL DEFAULT 0,
+                    eta_seconds INTEGER,
+                    current_object TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_archive_jobs_status
+                    ON archive_jobs(status, id);
+                CREATE INDEX IF NOT EXISTS idx_archive_jobs_updated
+                    ON archive_jobs(updated_at DESC, id DESC);
+                CREATE TABLE IF NOT EXISTS archive_job_items (
+                    job_id INTEGER NOT NULL,
+                    relative_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    bytes_done INTEGER NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, relative_key),
+                    FOREIGN KEY (job_id) REFERENCES archive_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_archive_job_items_status
+                    ON archive_job_items(job_id, status, relative_key);
                 """
+            )
+
+    def create_job(
+        self,
+        action: str,
+        *,
+        requested_by: str = "manual",
+        profile_id: str = "",
+        archive_date: str = "",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO archive_jobs(
+                    action, requested_by, profile_id, archive_date, status,
+                    phase, detail, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    str(action)[:32],
+                    str(requested_by)[:16],
+                    str(profile_id)[:64],
+                    str(archive_date)[:10],
+                    "queued",
+                    "queued",
+                    "等待后台任务执行",
+                    now,
+                    now,
+                ),
+            )
+            job_id = int(cursor.lastrowid)
+        return self.job(job_id) or {"id": job_id}
+
+    def job(self, job_id: int) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM archive_jobs WHERE id=?", (int(job_id),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 500))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM archive_jobs ORDER BY id DESC LIMIT ?", (bounded,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_job(self) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM archive_jobs "
+                "WHERE status IN ('queued','running','cancelling') "
+                "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 ELSE 2 END, id "
+                "LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def next_queued_job(self) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM archive_jobs WHERE status='queued' ORDER BY id LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_job(self, job_id: int, **fields: Any) -> None:
+        allowed = {
+            "profile_id", "archive_date", "status", "phase", "manifest_sha256",
+            "object_count", "objects_done", "bytes_total", "bytes_done",
+            "speed_bytes_per_second", "eta_seconds", "current_object", "detail",
+            "error", "cancel_requested", "started_at", "finished_at",
+        }
+        values = {key: value for key, value in fields.items() if key in allowed}
+        if not values:
+            return
+        values["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key}=?" for key in values)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE archive_jobs SET {assignments} WHERE id=?",
+                (*values.values(), int(job_id)),
+            )
+
+    def request_job_cancel(self, job_id: int) -> None:
+        job = self.job(job_id)
+        if not job or job["status"] not in {"queued", "running", "cancelling"}:
+            raise RuntimeError("当前任务不能取消")
+        now = utc_now()
+        if job["status"] == "queued":
+            self.update_job(
+                job_id,
+                status="cancelled",
+                phase="cancelled",
+                cancel_requested=1,
+                detail="任务在开始前已取消",
+                finished_at=now,
+            )
+            return
+        self.update_job(
+            job_id,
+            status="cancelling",
+            phase="cancelling",
+            cancel_requested=1,
+            detail="正在停止任务，已完成对象会保留",
+        )
+
+    def recover_interrupted_jobs(self) -> int:
+        now = utc_now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE archive_jobs
+                SET status='queued', phase='recovering', cancel_requested=0,
+                    detail='客户端重启，任务将从已完成对象继续', error='', updated_at=?
+                WHERE status IN ('running','cancelling')
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                UPDATE archive_days
+                SET status='interrupted',
+                    detail='客户端重启，等待从暂存对象继续',
+                    updated_at=?
+                WHERE status IN ('downloading','verifying')
+                """,
+                (now,),
+            )
+            return int(cursor.rowcount)
+
+    def replace_job_items(self, job_id: int, items: list[dict[str, Any]]) -> None:
+        now = utc_now()
+        normalized = [
+            {
+                "relative_key": str(item.get("relative_key") or "")[:2000],
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "sha256": str(item.get("sha256") or "")[:64],
+            }
+            for item in items
+            if str(item.get("relative_key") or "")
+        ]
+        incoming_keys = {item["relative_key"] for item in normalized}
+        with self._lock, self._connect() as connection:
+            existing_keys = {
+                str(row["relative_key"])
+                for row in connection.execute(
+                    "SELECT relative_key FROM archive_job_items WHERE job_id=?",
+                    (int(job_id),),
+                ).fetchall()
+            }
+            stale_keys = existing_keys - incoming_keys
+            if stale_keys:
+                connection.executemany(
+                    "DELETE FROM archive_job_items WHERE job_id=? AND relative_key=?",
+                    [(int(job_id), relative_key) for relative_key in stale_keys],
+                )
+            connection.executemany(
+                """
+                INSERT INTO archive_job_items(
+                    job_id, relative_key, status, size_bytes, bytes_done,
+                    sha256, updated_at
+                ) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(job_id, relative_key) DO UPDATE SET
+                    status=CASE
+                        WHEN archive_job_items.size_bytes=excluded.size_bytes
+                         AND archive_job_items.sha256=excluded.sha256
+                        THEN archive_job_items.status ELSE 'queued' END,
+                    bytes_done=CASE
+                        WHEN archive_job_items.size_bytes=excluded.size_bytes
+                         AND archive_job_items.sha256=excluded.sha256
+                        THEN archive_job_items.bytes_done ELSE 0 END,
+                    error=CASE
+                        WHEN archive_job_items.size_bytes=excluded.size_bytes
+                         AND archive_job_items.sha256=excluded.sha256
+                        THEN archive_job_items.error ELSE '' END,
+                    finished_at=CASE
+                        WHEN archive_job_items.size_bytes=excluded.size_bytes
+                         AND archive_job_items.sha256=excluded.sha256
+                        THEN archive_job_items.finished_at ELSE '' END,
+                    size_bytes=excluded.size_bytes,
+                    sha256=excluded.sha256,
+                    updated_at=excluded.updated_at
+                """,
+                [
+                    (
+                        int(job_id),
+                        item["relative_key"],
+                        "queued",
+                        item["size_bytes"],
+                        0,
+                        item["sha256"],
+                        now,
+                    )
+                    for item in normalized
+                ],
+            )
+
+    def update_job_item(self, job_id: int, relative_key: str, **fields: Any) -> None:
+        allowed = {
+            "status", "size_bytes", "bytes_done", "sha256", "attempts", "error",
+            "started_at", "finished_at",
+        }
+        values = {key: value for key, value in fields.items() if key in allowed}
+        if not values:
+            return
+        values["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key}=?" for key in values)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE archive_job_items SET {assignments} "
+                "WHERE job_id=? AND relative_key=?",
+                (*values.values(), int(job_id), str(relative_key)),
+            )
+
+    def job_items(self, job_id: int, limit: int = 1000) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 10000))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM archive_job_items WHERE job_id=? "
+                "ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'verifying' THEN 1 "
+                "WHEN 'failed' THEN 2 WHEN 'queued' THEN 3 ELSE 4 END, relative_key LIMIT ?",
+                (int(job_id), bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_job_items(self, job_id: int, status: str, error: str = "") -> None:
+        now = utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE archive_job_items
+                SET status=?,
+                    bytes_done=CASE WHEN ?='completed' THEN size_bytes ELSE bytes_done END,
+                    error=?, finished_at=?, updated_at=?
+                WHERE job_id=?
+                  AND (?='completed' OR status!='completed')
+                """,
+                (
+                    str(status)[:16], str(status), str(error)[:4000], now, now,
+                    int(job_id), str(status),
+                ),
             )
 
     def upsert_day(self, profile_id: str, archive_date: str, **fields: Any) -> None:

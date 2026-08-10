@@ -313,7 +313,8 @@ class UpdateManager:
         return self._helper_request(request)
 
     def restart(self) -> dict[str, Any]:
-        return self._helper_request({"action": "restart"})
+        staged = str(self.status().get("staged_revision") or "")
+        return self._helper_request({"action": "restart", "revision": staged})
 
     def _helper_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not Path(self.helper_socket).exists():

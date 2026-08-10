@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash
 
+from . import __version__
 from .config import CONFIG_VERSION, ClientConfig, ConfigStore
 from .database import StateDatabase
 from .manager import ArchiveManager
@@ -126,7 +127,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
 
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", client_version=__version__)
 
     @app.get("/api/bootstrap")
     def api_bootstrap():
@@ -138,6 +139,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "runtime": service.status(),
             "updates": updater.status(),
             "days": database.days(1000),
+            "jobs": database.jobs(100),
             "comparisons": database.comparisons(180),
             "events": database.events(100),
             "initial_password_pending": config_store.initial_password_path.exists(),
@@ -150,6 +152,7 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "runtime": service.status(),
             "updates": updater.status(),
             "days": database.days(1000),
+            "jobs": database.jobs(100),
             "comparisons": database.comparisons(180),
             "events": database.events(100),
         })
@@ -165,6 +168,21 @@ def create_app(store: ConfigStore | None = None) -> Flask:
         return jsonify({
             "ok": True,
             "detail": database_manager.day_detail(profile_id, archive_date),
+        })
+
+    @app.get("/api/jobs")
+    def api_jobs():
+        return jsonify({"ok": True, "jobs": database.jobs(200)})
+
+    @app.get("/api/jobs/<int:job_id>/items")
+    def api_job_items(job_id: int):
+        job = database.job(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "任务不存在"}), 404
+        return jsonify({
+            "ok": True,
+            "job": job,
+            "items": database.job_items(job_id, 10000),
         })
 
     @app.get("/api/files/dates")
@@ -248,8 +266,22 @@ def create_app(store: ConfigStore | None = None) -> Flask:
     @app.post("/api/actions/scan")
     def api_scan():
         payload = request.get_json(silent=True) or {}
-        service.request_scan(download=bool(payload.get("download", True)))
-        return jsonify({"ok": True})
+        job = service.request_scan(download=bool(payload.get("download", True)))
+        return jsonify({"ok": True, "job": job})
+
+    @app.post("/api/actions/download")
+    def api_download():
+        payload = request.get_json(silent=True) or {}
+        profile_id = str(payload.get("profile_id") or "").strip()
+        archive_date = str(payload.get("archive_date") or "").strip()
+        if not profile_id or not archive_date:
+            raise ValueError("缺少采集服务器或归档日期")
+        try:
+            date.fromisoformat(archive_date)
+        except ValueError as exc:
+            raise ValueError("归档日期无效") from exc
+        job = service.request_download(profile_id, archive_date)
+        return jsonify({"ok": True, "job": job})
 
     @app.post("/api/actions/verify")
     def api_verify():
@@ -262,8 +294,8 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             date.fromisoformat(archive_date)
         except ValueError as exc:
             raise ValueError("归档日期无效") from exc
-        service.request_verify(profile_id, archive_date)
-        return jsonify({"ok": True})
+        job = service.request_verify(profile_id, archive_date)
+        return jsonify({"ok": True, "job": job})
 
     @app.post("/api/actions/cancel")
     def api_cancel():
