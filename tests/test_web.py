@@ -5,7 +5,7 @@ from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.web import create_app
 
 
-def test_file_manager_is_the_default_workspace(tmp_path) -> None:
+def test_overview_is_the_default_workspace(tmp_path) -> None:
     store = ConfigStore(tmp_path / "state")
     store.load()
     app = create_app(store)
@@ -16,7 +16,11 @@ def test_file_manager_is_the_default_workspace(tmp_path) -> None:
         assert client.post("/login", data={"password": password}).status_code == 302
         page = client.get("/").get_data(as_text=True)
 
-        assert 'id="remote-files-page" class="page file-page active"' in page
+        assert 'class="nav-item active" data-page="overview"' in page
+        assert 'id="overview-page" class="page active"' in page
+        assert 'id="remote-files-page" class="page file-page"' in page
+        assert page.index('data-page="overview"') < page.index('data-page="jobs"')
+        assert page.index('data-page="jobs"') < page.index('data-page="files"')
         assert 'id="remote-tree"' in page
         assert 'id="remote-search"' in page
         assert 'id="remote-files-body"' in page

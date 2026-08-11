@@ -11,11 +11,10 @@
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark small">S</span><span><b>SMSI</b><small>归档中心 · v{{ client_version }}</small></span></div>
       <nav class="side-nav" aria-label="主导航">
-        <span class="nav-section-label">文件</span>
-        <button class="nav-item active" data-page="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>归档文件</b><small>云端与本地浏览</small></span></button>
         <span class="nav-section-label">管理</span>
-        <button class="nav-item" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>运行总览</b><small>归档与存储状态</small></span></button>
+        <button class="nav-item active" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><b>运行总览</b><small>归档与存储状态</small></span></button>
         <button class="nav-item" data-page="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span><b>传输任务</b><small id="nav-job-state">当前空闲</small></span></button>
+        <button class="nav-item" data-page="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 10h16M9 14h6"/></svg><span><b>归档文件</b><small>云端与本地浏览</small></span></button>
         <button class="nav-item" data-page="updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/><path d="M20 3v5h-5"/></svg><span><b>客户端更新</b><small id="nav-update-state">检查版本</small></span></button>
         <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span><b>设置</b><small>来源与运行策略</small></span></button>
       </nav>
@@ -31,7 +30,7 @@
     </aside>
 
     <main class="app-shell">
-      <section id="overview-page" class="page">
+      <section id="overview-page" class="page active">
         <div class="page-heading">
           <div><p class="eyebrow">BACKUP CONTROL</p><h1>归档状态</h1></div>
           <div class="heading-actions">
@@ -108,7 +107,7 @@
         </section>
       </section>
 
-      <section id="remote-files-page" class="page file-page active" data-scope="remote">
+      <section id="remote-files-page" class="page file-page" data-scope="remote">
         <div class="page-heading file-page-heading">
           <div><p class="eyebrow">云端归档</p><h1>Google Drive</h1><p id="remote-location-summary" class="page-description">正在连接采集服务器</p></div>
           <div class="file-scope-tabs" aria-label="文件位置">

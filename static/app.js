@@ -1107,7 +1107,6 @@
     const result = await api("/api/bootstrap");
     state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events;
     renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
-    await loadFileDates("remote");
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
     state.timer = setInterval(refresh, 5000);
   }
