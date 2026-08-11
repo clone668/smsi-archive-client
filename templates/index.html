@@ -191,7 +191,7 @@
 
       <section id="updates-page" class="page">
         <div class="page-heading">
-          <div><p class="eyebrow">CLIENT MAINTENANCE</p><h1>客户端更新</h1><p class="page-description">更新包先下载并校验；客户端空闲时也可按需重启当前版本。</p></div>
+          <div><p class="eyebrow">CLIENT MAINTENANCE</p><h1>客户端更新</h1><p class="page-description">更新包先下载并校验；任务运行中重启会安全暂停并在启动后继续。</p></div>
         </div>
 
         <section class="update-version-grid">
@@ -206,7 +206,7 @@
           <div class="update-actions" aria-label="客户端更新操作">
             <div class="update-step"><span class="step-number">1</span><div><strong>检查版本</strong><small>只读取 GitHub 版本信息</small></div><button id="check-update" class="button secondary">检查更新</button></div>
             <div class="update-step"><span class="step-number">2</span><div><strong>下载并校验</strong><small>不会替换正在运行的代码</small></div><button id="download-update" class="button primary" disabled>开始更新</button></div>
-            <div class="update-step"><span class="step-number">3</span><div><strong>重启客户端</strong><small id="restart-hint">空闲时可按需重启</small></div><button id="restart-update" class="button secondary" disabled>重启客户端</button></div>
+            <div class="update-step"><span class="step-number">3</span><div><strong>重启客户端</strong><small id="restart-hint">可按需安全重启</small></div><button id="restart-update" class="button secondary" disabled>重启客户端</button></div>
           </div>
           <div id="update-progress" class="update-progress" aria-live="polite">
             <div class="update-progress-head"><span id="update-phase">等待操作</span><strong id="update-percent">--</strong></div>

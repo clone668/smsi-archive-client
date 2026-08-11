@@ -24,6 +24,7 @@ class ArchiveService:
         self._stop = threading.Event()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        self._resume_thread: threading.Thread | None = None
         self._pending: tuple[int, str, dict[str, str]] | None = None
         self._current_job_id = 0
         self._last_progress_write = 0.0
@@ -44,20 +45,55 @@ class ArchiveService:
         }
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(
-            target=self._loop, name="archive-service", daemon=True
-        )
-        self._thread.start()
+        with self._condition:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._cancel.clear()
+            self._thread = threading.Thread(
+                target=self._loop, name="archive-service", daemon=True
+            )
+            self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 30) -> bool:
         self._stop.set()
         self._cancel.set()
         with self._condition:
             self._condition.notify_all()
-        if self._thread:
-            self._thread.join(timeout=15)
+            thread = self._thread
+        if thread:
+            thread.join(timeout=timeout)
+        stopped = thread is None or not thread.is_alive()
+        if stopped:
+            with self._condition:
+                if self._thread is thread:
+                    self._thread = None
+        return stopped
+
+    def resume_when_stopped(self) -> None:
+        with self._condition:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                self.start()
+                return
+            if not self._stop.is_set():
+                return
+            if self._resume_thread and self._resume_thread.is_alive():
+                return
+            resume_thread = threading.Thread(
+                target=self._resume_after,
+                args=(thread,),
+                name="archive-service-resume",
+                daemon=True,
+            )
+            self._resume_thread = resume_thread
+            resume_thread.start()
+
+    def _resume_after(self, thread: threading.Thread) -> None:
+        thread.join()
+        with self._condition:
+            self._resume_thread = None
+        self.start()
 
     def _queue_job(
         self,

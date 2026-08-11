@@ -395,7 +395,7 @@
     } else if (staged) {
       label = "待重启";
       tone = "good";
-      status = archiveBusy ? `版本 ${staged} 已准备，归档任务完成后可重启。` : `版本 ${staged} 已准备，可以重启客户端。`;
+      status = archiveBusy ? `版本 ${staged} 已准备；重启时会安全暂停当前任务，启动后继续。` : `版本 ${staged} 已准备，可以重启客户端。`;
     } else if (remote && updates.update_available) {
       label = "有新版本";
       tone = "warn";
@@ -416,15 +416,15 @@
     $("#nav-update-state").textContent = label;
     $("#check-update").disabled = active;
     $("#download-update").disabled = active || !updates.update_available || !!staged;
-    $("#restart-update").disabled = active || archiveBusy || !updates.helper_available;
+    $("#restart-update").disabled = active || !updates.helper_available;
     const blockedReason = $("#update-blocked-reason");
     if (archiveBusy) {
       const progress = state.runtime?.progress || {};
       const archivePhase = archivePhaseMap[progress.phase] || "归档任务正在运行";
       const objects = progress.object_count ? ` · ${Number(progress.objects_done || 0)}/${Number(progress.object_count)} 个对象` : "";
-      blockedReason.textContent = `${archivePhase}${objects}；归档完成后才能重启客户端，避免中断校验。`;
+      blockedReason.textContent = `${archivePhase}${objects}；重启会安全暂停当前任务，已完成对象和临时文件会保留，启动后继续。`;
       blockedReason.className = "workflow-notice warn";
-      $("#restart-update").title = "归档任务运行中，完成后才允许重启";
+      $("#restart-update").title = "安全暂停当前任务并重启客户端";
     } else if (staged && !active && updates.helper_available) {
       blockedReason.textContent = "更新包已下载并校验，可以重启客户端。";
       blockedReason.className = "workflow-notice good";
@@ -441,7 +441,7 @@
     $("#restart-hint").textContent = !updates.helper_available
       ? "Ubuntu 更新助手不可用"
       : archiveBusy
-        ? "归档任务结束后可重启"
+        ? "可重启，当前任务随后恢复"
         : staged ? "更新已准备，可以安全切换" : "空闲时可按需重启";
 
     const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
@@ -507,7 +507,7 @@
       const result = await api("/api/update/download", { method: "POST", body: JSON.stringify({ revision }) });
       state.updates = result.updates;
       renderUpdates();
-      toast("更新已准备，归档任务空闲后可重启客户端");
+      toast("更新已准备，可以重启客户端");
     } catch (error) { toast(error.message, true); }
     finally { stopUpdatePolling(); await pollUpdateStatus(); }
   }
@@ -516,15 +516,18 @@
     const button = $("#restart-update");
     const targetRevision = state.updates?.staged_revision || state.updates?.current_revision || "";
     const activatesUpdate = !!state.updates?.staged_revision;
+    const archiveBusy = !!state.runtime?.running;
     button.disabled = true;
-    $("#update-detail").textContent = activatesUpdate
-      ? "正在切换更新并重启客户端，等待新版本上线..."
-      : "正在重启客户端，等待服务恢复...";
+    $("#update-detail").textContent = archiveBusy
+      ? "正在安全暂停当前归档任务；随后重启客户端并自动恢复任务..."
+      : activatesUpdate
+        ? "正在切换更新并重启客户端，等待新版本上线..."
+        : "正在重启客户端，等待服务恢复...";
     $("#update-detail").className = "update-detail";
     try {
       await api("/api/update/restart", { method: "POST", body: "{}" });
     } catch (error) {
-      const blocked = /归档任务正在运行|更新助手未安装|更新助手拒绝|无法连接更新助手/.test(error.message);
+      const blocked = /未能在 30 秒内安全暂停|归档任务正在运行|更新助手未安装|更新助手拒绝|无法连接更新助手/.test(error.message);
       if (blocked) {
         toast(error.message, true);
         button.disabled = false;

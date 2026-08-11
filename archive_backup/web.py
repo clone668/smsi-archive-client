@@ -237,9 +237,23 @@ def create_app(store: ConfigStore | None = None) -> Flask:
 
     @app.post("/api/update/restart")
     def api_update_restart():
-        if service.status().get("running"):
-            raise RuntimeError("归档任务正在运行，请完成后再重启客户端")
-        result = updater.restart()
+        archive_was_running = bool(service.status().get("running"))
+        if not service.stop(timeout=30):
+            service.resume_when_stopped()
+            raise RuntimeError("当前任务未能在 30 秒内安全暂停，客户端没有重启")
+        try:
+            result = updater.restart()
+        except Exception:
+            # The process stays alive when the privileged helper rejects the
+            # request, so resume archive work instead of leaving it stopped.
+            service.start()
+            raise
+        if archive_was_running:
+            database.event(
+                "info",
+                "客户端重启前已安全暂停归档任务",
+                detail="已完成对象保留，客户端启动后将继续任务",
+            )
         return jsonify({"ok": True, "result": result})
 
     @app.put("/api/config")

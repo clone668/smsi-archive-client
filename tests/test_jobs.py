@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
+
 from archive_backup.config import ConfigStore
 from archive_backup.database import StateDatabase
 from archive_backup.service import ArchiveService
+from archive_backup.verifier import OperationCancelled
 
 
 def test_archive_day_report_summary_round_trips_as_object(tmp_path) -> None:
@@ -204,3 +207,55 @@ def test_completed_object_is_persisted_even_when_job_updates_are_throttled(
     assert item["status"] == "completed"
     assert item["bytes_done"] == 100
     assert persisted_job["manifest_sha256"] == "f" * 64
+
+
+def test_archive_service_can_start_again_after_a_safe_stop(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+
+    service.start()
+    assert service._thread is not None and service._thread.is_alive()
+    assert service.stop() is True
+
+    service.start()
+    try:
+        assert service._thread is not None and service._thread.is_alive()
+        assert not service._stop.is_set()
+        assert not service._cancel.is_set()
+    finally:
+        assert service.stop() is True
+
+
+def test_safe_stop_queues_running_job_for_resume(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+    executing = threading.Event()
+
+    def execute(_job_id, _action, arguments):
+        database.upsert_day(
+            arguments["profile_id"],
+            arguments["archive_date"],
+            status="downloading",
+            detail="正在下载",
+        )
+        executing.set()
+        assert service._cancel.wait(timeout=2)
+        raise OperationCancelled("操作已取消，未完成结果不会发布")
+
+    service._execute = execute
+    job = service.request_download("collector-a", "2026-08-09")
+    service.start()
+
+    assert executing.wait(timeout=2)
+    assert service.stop(timeout=2) is True
+    recovered = database.job(job["id"])
+    day = database.day("collector-a", "2026-08-09")
+    assert recovered["status"] == "queued"
+    assert recovered["phase"] == "recovering"
+    assert recovered["cancel_requested"] == 0
+    assert day["status"] == "interrupted"
+    assert service._thread is None

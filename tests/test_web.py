@@ -5,6 +5,12 @@ from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.web import create_app
 
 
+def _login(client, store: ConfigStore) -> str:
+    password = store.initial_password_path.read_text(encoding="utf-8").strip()
+    assert client.post("/login", data={"password": password}).status_code == 302
+    return str(client.get("/api/bootstrap").get_json()["csrf"])
+
+
 def test_overview_is_the_default_workspace(tmp_path) -> None:
     store = ConfigStore(tmp_path / "state")
     store.load()
@@ -198,3 +204,102 @@ def test_download_endpoint_requires_csrf_and_queues_selected_date(tmp_path) -> N
         }
     finally:
         app.extensions["smsi_archive_service"].stop()
+
+
+def test_restart_safely_stops_archive_service_before_calling_helper(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    updater = app.extensions["smsi_update_manager"]
+    original_stop = service.stop
+    calls = []
+    try:
+        csrf = _login(client, store)
+        service.status = lambda: {"running": True}
+        service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
+        updater.restart = lambda: calls.append(("restart", None)) or {"restarted": True}
+
+        response = client.post(
+            "/api/update/restart",
+            json={},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert response.status_code == 200
+        assert calls == [("stop", 30), ("restart", None)]
+    finally:
+        service.stop = original_stop
+        service.stop()
+
+
+def test_restart_failure_resumes_archive_service(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    updater = app.extensions["smsi_update_manager"]
+    original_stop = service.stop
+    original_start = service.start
+    calls = []
+    try:
+        csrf = _login(client, store)
+        service.status = lambda: {"running": True}
+        service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
+        service.start = lambda: calls.append(("start", None))
+
+        def fail_restart():
+            calls.append(("restart", None))
+            raise RuntimeError("更新助手拒绝操作")
+
+        updater.restart = fail_restart
+        response = client.post(
+            "/api/update/restart",
+            json={},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert response.status_code == 409
+        assert response.get_json()["error"] == "更新助手拒绝操作"
+        assert calls == [("stop", 30), ("restart", None), ("start", None)]
+    finally:
+        service.stop = original_stop
+        service.start = original_start
+        service.stop()
+
+
+def test_restart_pause_timeout_schedules_archive_service_resume(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    updater = app.extensions["smsi_update_manager"]
+    original_stop = service.stop
+    original_resume = service.resume_when_stopped
+    calls = []
+    try:
+        csrf = _login(client, store)
+        service.status = lambda: {"running": True}
+        service.stop = lambda timeout=30: calls.append(("stop", timeout)) or False
+        service.resume_when_stopped = lambda: calls.append(("resume", None))
+        updater.restart = lambda: calls.append(("restart", None))
+
+        response = client.post(
+            "/api/update/restart",
+            json={},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert response.status_code == 409
+        assert "没有重启" in response.get_json()["error"]
+        assert calls == [("stop", 30), ("resume", None)]
+    finally:
+        service.stop = original_stop
+        service.resume_when_stopped = original_resume
+        service.stop()
