@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,7 +15,13 @@ from typing import Any, Callable, Mapping
 from .config import ClientConfig, ProfileConfig
 from .comparison import build_archive_comparisons
 from .database import StateDatabase
-from .protocol import DATE_RE, ManifestSnapshot, parse_manifest, parse_progress
+from .protocol import (
+    DATE_RE,
+    RUNTIME_REPORT_CONTRACT,
+    ManifestSnapshot,
+    parse_manifest,
+    parse_progress,
+)
 from .sources import ArchiveSource, build_source, split_bandwidth_limit
 from .verifier import (
     OperationCancelled,
@@ -32,6 +39,13 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    temporary.replace(path)
+
+
+def write_bytes_atomic(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(payload)
     temporary.replace(path)
 
 
@@ -211,11 +225,152 @@ class ArchiveManager:
             return None
         if int(receipt.get("object_count") or -1) != snapshot.object_count:
             raise RuntimeError("本地验证凭据对象数不一致")
+        if int(receipt.get("row_count") or -1) != snapshot.row_count:
+            raise RuntimeError("本地验证凭据行数不一致")
         for item in snapshot.objects:
             path = local_object_path(final, str(item["relative_key"]), archive_date)
             if not path.is_file() or path.stat().st_size != int(item["size_bytes"]):
                 return None
         return receipt
+
+    @staticmethod
+    def _legacy_report_removal_item(
+        old_snapshot: ManifestSnapshot,
+        new_snapshot: ManifestSnapshot,
+    ) -> dict[str, Any] | None:
+        old_manifest = old_snapshot.manifest
+        new_manifest = new_snapshot.manifest
+        maintenance = new_manifest.get("maintenance")
+        if (
+            not isinstance(maintenance, Mapping)
+            or maintenance.get("contract_version")
+            != "smsi-archive-manifest-maintenance/v1"
+            or maintenance.get("action") != "remove_legacy_runtime_report"
+            or str(maintenance.get("previous_manifest_sha256") or "")
+            != old_snapshot.sha256
+        ):
+            return None
+        old_reports = [
+            (index, item)
+            for index, item in enumerate(old_snapshot.objects)
+            if item.get("kind") == "runtime_report"
+        ]
+        if len(old_reports) != 1 or any(
+            item.get("kind") == "runtime_report" for item in new_snapshot.objects
+        ):
+            return None
+        report_index, report_item = old_reports[0]
+        if (
+            str(report_item.get("relative_key") or "")
+            != f"date={old_snapshot.archive_date}/runtime-report.json"
+            or report_item.get("report_contract_version")
+            != RUNTIME_REPORT_CONTRACT
+        ):
+            return None
+        if [
+            item for index, item in enumerate(old_snapshot.objects)
+            if index != report_index
+        ] != new_snapshot.objects:
+            return None
+        ignored = {"objects", "object_count", "row_count", "replicas", "maintenance"}
+        old_static = {
+            key: value for key, value in old_manifest.items() if key not in ignored
+        }
+        new_static = {
+            key: value for key, value in new_manifest.items() if key not in ignored
+        }
+        if old_static != new_static:
+            return None
+        old_replicas = old_manifest.get("replicas")
+        new_replicas = new_manifest.get("replicas")
+        if not isinstance(old_replicas, Mapping) or not isinstance(new_replicas, Mapping):
+            return None
+        if set(old_replicas) != set(new_replicas):
+            return None
+        for name, proofs in old_replicas.items():
+            if not isinstance(proofs, list):
+                return None
+            if [item for index, item in enumerate(proofs) if index != report_index] != new_replicas[name]:
+                return None
+        return report_item
+
+    def _migrate_legacy_report_removal(
+        self,
+        profile: ProfileConfig,
+        source: ArchiveSource,
+        archive_date: str,
+        snapshot: ManifestSnapshot,
+    ) -> dict[str, Any] | None:
+        final = self.final_root(profile, archive_date)
+        manifest_path = final / "manifest.json"
+        receipt_path = final / ".smsi-verified.json"
+        failure_path = final / ".smsi-verification-failed.json"
+        if not manifest_path.is_file() or not receipt_path.is_file() or failure_path.exists():
+            return None
+        old_manifest_raw = manifest_path.read_bytes()
+        old_snapshot = parse_manifest(old_manifest_raw, archive_date)
+        if old_snapshot.sha256 == snapshot.sha256:
+            return None
+        report_item = self._legacy_report_removal_item(old_snapshot, snapshot)
+        if report_item is None:
+            return None
+        old_receipt_raw = receipt_path.read_bytes()
+        old_receipt = read_json(receipt_path)
+        if (
+            not old_receipt
+            or old_receipt.get("contract_version")
+            != "smsi-local-archive-verification/v1"
+            or old_receipt.get("status") != "verified"
+            or old_receipt.get("archive_date") != archive_date
+            or old_receipt.get("manifest_sha256") != old_snapshot.sha256
+            or int(old_receipt.get("object_count") or -1) != old_snapshot.object_count
+            or int(old_receipt.get("row_count") or -1) != old_snapshot.row_count
+        ):
+            return None
+        report_path = local_object_path(
+            final,
+            str(report_item["relative_key"]),
+            archive_date,
+        )
+        report_raw = report_path.read_bytes() if report_path.is_file() else None
+        if report_raw is not None and (
+            len(report_raw) != int(report_item["size_bytes"])
+            or hashlib.sha256(report_raw).hexdigest() != str(report_item["sha256"])
+        ):
+            raise RuntimeError("旧运行报告与原 manifest 不一致，拒绝自动迁移")
+
+        verification = verify_local_day(final, snapshot, cancel=self.cancel)
+        latest, state, detail = self._remote_snapshot(source, profile, archive_date)
+        if latest is None or latest.sha256 != snapshot.sha256:
+            raise RuntimeError(f"迁移校验期间远端 manifest 发生变化: {state} · {detail}")
+        verification.update({
+            "profile_id": profile.profile_id,
+            "collector_id": profile.collector_id,
+            "source_type": profile.source_type,
+            "source_name": source.name,
+            "downloaded_bytes_this_run": 0,
+        })
+        try:
+            write_bytes_atomic(manifest_path, snapshot.raw)
+            if report_path.exists():
+                report_path.unlink()
+            write_json_atomic(receipt_path, verification)
+        except Exception:
+            write_bytes_atomic(manifest_path, old_manifest_raw)
+            write_bytes_atomic(receipt_path, old_receipt_raw)
+            if report_raw is not None:
+                write_bytes_atomic(report_path, report_raw)
+            elif report_path.exists():
+                report_path.unlink()
+            raise
+        self.database.event(
+            "info",
+            "旧运行报告清单已安全迁移",
+            profile_id=profile.profile_id,
+            archive_date=archive_date,
+            detail="业务归档未重新下载，已重新完成恢复验证",
+        )
+        return verification
 
     def _reserve_disk(self, required_bytes: int) -> None:
         self.config.archive_root.mkdir(parents=True, exist_ok=True)
@@ -587,6 +742,29 @@ class ArchiveManager:
         try:
             receipt = self._verified_receipt(profile, archive_date, snapshot)
         except RuntimeError as exc:
+            try:
+                receipt = self._migrate_legacy_report_removal(
+                    profile, source, archive_date, snapshot
+                )
+            except RuntimeError as migration_exc:
+                exc = migration_exc
+                receipt = None
+            if receipt is not None:
+                report_summary = self._report_summary_json(
+                    self.final_root(profile, archive_date), snapshot
+                )
+                self.database.upsert_day(
+                    profile.profile_id, archive_date, status="verified",
+                    manifest_sha256=snapshot.sha256,
+                    object_count=snapshot.object_count,
+                    objects_done=snapshot.object_count,
+                    row_count=snapshot.row_count,
+                    bytes_total=sum(int(item["size_bytes"]) for item in snapshot.objects),
+                    bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
+                    detail="清单维护已同步，恢复验证通过", error="",
+                    report_summary=report_summary,
+                )
+                return receipt
             self.database.upsert_day(
                 profile.profile_id, archive_date, status="manifest_changed",
                 manifest_sha256=snapshot.sha256, detail="需要人工复核", error=str(exc),

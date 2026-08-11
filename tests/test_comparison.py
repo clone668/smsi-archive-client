@@ -8,6 +8,7 @@ from pathlib import Path
 from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.database import StateDatabase
 from archive_backup.manager import ArchiveManager
+from archive_backup.comparison import compare_archives
 
 
 def _clone_source(
@@ -16,6 +17,7 @@ def _clone_source(
     collector_id: str,
     *,
     record_count: int = 2,
+    reportless: bool = False,
 ) -> Path:
     source_root = tmp_path / f"source-{collector_id}" / f"collector={collector_id}"
     day_root = source_root / f"date={fixture['archive_date']}"
@@ -39,6 +41,37 @@ def _clone_source(
     manifest_raw = json.dumps(
         manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+    if reportless:
+        previous_sha = hashlib.sha256(manifest_raw).hexdigest()
+        report_index = next(
+            index
+            for index, item in enumerate(manifest["objects"])
+            if item["kind"] == "runtime_report"
+        )
+        manifest["objects"] = [
+            item for index, item in enumerate(manifest["objects"])
+            if index != report_index
+        ]
+        manifest["object_count"] = len(manifest["objects"])
+        manifest["row_count"] = sum(
+            int(item["row_count"]) for item in manifest["objects"]
+        )
+        manifest["replicas"] = {
+            name: [
+                item for index, item in enumerate(proofs)
+                if index != report_index
+            ]
+            for name, proofs in manifest["replicas"].items()
+        }
+        manifest["maintenance"] = {
+            "contract_version": "smsi-archive-manifest-maintenance/v1",
+            "action": "remove_legacy_runtime_report",
+            "previous_manifest_sha256": previous_sha,
+        }
+        manifest_raw = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        report_path.unlink()
     manifest_path.write_bytes(manifest_raw)
     receipt_path = day_root / ".smsi-verified.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -47,10 +80,22 @@ def _clone_source(
     return source_root
 
 
-def _two_profile_config(tmp_path: Path, fixture: dict, *, right_records: int = 2):
-    left_source = _clone_source(fixture, tmp_path, "collector-a")
+def _two_profile_config(
+    tmp_path: Path,
+    fixture: dict,
+    *,
+    right_records: int = 2,
+    reportless: bool = False,
+):
+    left_source = _clone_source(
+        fixture, tmp_path, "collector-a", reportless=reportless
+    )
     right_source = _clone_source(
-        fixture, tmp_path, "collector-b", record_count=right_records
+        fixture,
+        tmp_path,
+        "collector-b",
+        record_count=right_records,
+        reportless=reportless,
     )
     profiles = [
         ProfileConfig(
@@ -104,17 +149,50 @@ def test_two_server_comparison_flags_large_record_volume_difference(
     tmp_path: Path,
     archive_fixture,
 ) -> None:
-    fixture = archive_fixture()
-    config = _two_profile_config(tmp_path, fixture, right_records=1)
-    database = StateDatabase(tmp_path / "state.sqlite3")
-    manager = ArchiveManager(config, database)
-
-    manager.scan_all(download=True)
-
-    comparison = database.comparisons()[0]
+    common = {
+        "collector_id": "collector-a",
+        "reported_collector_id": "",
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": False,
+        "overall_status": "unknown",
+        "quality_policy_sha256": "",
+        "source_health": {},
+        "business_inventory": {"price_data": 100},
+    }
+    comparison = compare_archives(
+        "2026-08-07",
+        {**common, "profile_id": "left", "record_count": 100},
+        {
+            **common,
+            "profile_id": "right",
+            "collector_id": "collector-b",
+            "record_count": 50,
+            "business_inventory": {"price_data": 50},
+        },
+    )
     assert comparison["status"] == "attention"
     assert comparison["record_relative_difference"] == 0.5
     assert any(
         item["code"] == "record_volume_difference"
         for item in comparison["issues"]
     )
+
+
+def test_reportless_archives_compare_business_data_without_warning(
+    tmp_path: Path,
+    archive_fixture,
+) -> None:
+    fixture = archive_fixture()
+    config = _two_profile_config(tmp_path, fixture, reportless=True)
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+
+    results = manager.scan_all(download=True)
+
+    assert all(item["failed"] == 0 for item in results)
+    comparison = database.comparisons()[0]
+    assert comparison["status"] == "healthy"
+    assert comparison["record_count"] == {"left": 2, "right": 2}
+    assert comparison["source_health"] == []
+    assert comparison["issues"] == []

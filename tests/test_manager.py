@@ -130,6 +130,85 @@ def test_manifest_change_does_not_overwrite_verified_day(tmp_path, archive_fixtu
     assert row["status"] == "manifest_changed"
 
 
+def test_legacy_report_removal_migrates_metadata_without_downloading_business_files(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    final = manager.final_root(profile, fixture["archive_date"])
+    business = final / "business" / "table=price_data" / "day" / "part-00000.parquet"
+    business_hash = hashlib.sha256(business.read_bytes()).hexdigest()
+    business_mtime = business.stat().st_mtime_ns
+
+    source_manifest_path = fixture["day_root"] / "manifest.json"
+    old_raw = source_manifest_path.read_bytes()
+    old_sha = hashlib.sha256(old_raw).hexdigest()
+    updated = json.loads(old_raw.decode("utf-8"))
+    report_index = next(
+        index
+        for index, item in enumerate(updated["objects"])
+        if item["kind"] == "runtime_report"
+    )
+    updated["objects"] = [
+        item for index, item in enumerate(updated["objects"])
+        if index != report_index
+    ]
+    updated["object_count"] = len(updated["objects"])
+    updated["row_count"] = sum(int(item["row_count"]) for item in updated["objects"])
+    updated["replicas"] = {
+        name: [
+            item for index, item in enumerate(proofs)
+            if index != report_index
+        ]
+        for name, proofs in updated["replicas"].items()
+    }
+    updated["maintenance"] = {
+        "contract_version": "smsi-archive-manifest-maintenance/v1",
+        "action": "remove_legacy_runtime_report",
+        "previous_manifest_sha256": old_sha,
+    }
+    updated_raw = json.dumps(
+        updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    source_manifest_path.write_bytes(updated_raw)
+    fixture["report_path"].unlink()
+    source_receipt_path = fixture["day_root"] / ".smsi-verified.json"
+    source_receipt = json.loads(source_receipt_path.read_text(encoding="utf-8"))
+    source_receipt.update({
+        "manifest_sha256": hashlib.sha256(updated_raw).hexdigest(),
+        "object_count": updated["object_count"],
+        "row_count": updated["row_count"],
+    })
+    source_receipt_path.write_text(json.dumps(source_receipt), encoding="utf-8")
+    monkeypatch.setattr(
+        VerifiedDirectorySource,
+        "download",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("业务文件不应重新下载")
+        ),
+    )
+
+    result = manager.scan_profile(profile, download=True)
+
+    assert result["failed"] == 0
+    assert (final / "manifest.json").read_bytes() == updated_raw
+    assert not (final / "runtime-report.json").exists()
+    assert hashlib.sha256(business.read_bytes()).hexdigest() == business_hash
+    assert business.stat().st_mtime_ns == business_mtime
+    local_receipt = json.loads(
+        (final / ".smsi-verified.json").read_text(encoding="utf-8")
+    )
+    assert local_receipt["manifest_sha256"] == hashlib.sha256(updated_raw).hexdigest()
+    assert local_receipt["object_count"] == 1
+    assert local_receipt["row_count"] == 2
+    day = database.day(profile.profile_id, fixture["archive_date"])
+    assert day["status"] == "verified"
+    assert day["report_summary"] == {}
+
+
 class RunningSource:
     name = "test"
 

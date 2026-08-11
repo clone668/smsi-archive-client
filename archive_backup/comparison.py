@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from itertools import combinations
 from pathlib import Path
@@ -46,26 +45,6 @@ def _load_verified_archive(
         or int(receipt.get("row_count") or -1) != snapshot.row_count
     ):
         raise RuntimeError("本地恢复验证凭据与 manifest 不一致")
-    report_items = [
-        item for item in snapshot.objects if item.get("kind") == "runtime_report"
-    ]
-    if len(report_items) != 1:
-        raise RuntimeError("归档中缺少唯一的 24 小时运行报告")
-    report_item = report_items[0]
-    report_path = local_object_path(
-        root,
-        str(report_item["relative_key"]),
-        archive_date,
-    )
-    if (
-        not report_path.is_file()
-        or report_path.stat().st_size != int(report_item["size_bytes"])
-        or hashlib.sha256(report_path.read_bytes()).hexdigest()
-        != str(report_item["sha256"])
-    ):
-        raise RuntimeError("本地运行报告 SHA-256 校验失败")
-    verify_runtime_report(report_path, report_item, archive_date)
-    report = _read_json(report_path)
     inventory: dict[str, int] = {}
     for item in snapshot.objects:
         if item.get("kind") != "business":
@@ -74,6 +53,19 @@ def _load_verified_archive(
         inventory[table_name] = inventory.get(table_name, 0) + int(
             item.get("row_count") or 0
         )
+    report_items = [
+        item for item in snapshot.objects if item.get("kind") == "runtime_report"
+    ]
+    report: dict[str, Any] = {}
+    if len(report_items) == 1:
+        report_item = report_items[0]
+        report_path = local_object_path(
+            root,
+            str(report_item["relative_key"]),
+            archive_date,
+        )
+        verify_runtime_report(report_path, report_item, archive_date)
+        report = _read_json(report_path)
     source_health = {
         str(item.get("source_id") or "unknown"): str(
             (item.get("quality") or {}).get("status") or "unknown"
@@ -88,6 +80,7 @@ def _load_verified_archive(
         "manifest_sha256": snapshot.sha256,
         "manifest": snapshot,
         "report": report,
+        "report_present": bool(report),
         "overall_status": str(report.get("overall_status") or "unknown"),
         "quality_policy_sha256": str(
             ((report.get("collection_sources") or {}).get("quality_policy") or {}).get(
@@ -96,10 +89,7 @@ def _load_verified_archive(
             or ""
         ),
         "source_health": source_health,
-        "record_count": int(
-            ((report.get("database") or {}).get("writes") or {}).get("record_count")
-            or 0
-        ),
+        "record_count": sum(inventory.values()),
         "business_inventory": dict(sorted(inventory.items())),
     }
 
@@ -115,7 +105,7 @@ def compare_archives(
 ) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
     for side in (left, right):
-        if side["reported_collector_id"] != side["collector_id"]:
+        if side["report_present"] and side["reported_collector_id"] != side["collector_id"]:
             issues.append(
                 _issue(
                     "critical",
@@ -124,7 +114,7 @@ def compare_archives(
                 )
             )
         status = side["overall_status"]
-        if status != "healthy":
+        if side["report_present"] and status != "healthy":
             issues.append(
                 _issue(
                     status if status in {"critical", "attention"} else "unknown",
@@ -132,18 +122,25 @@ def compare_archives(
                     f"24 小时报告状态为 {status}",
                 )
             )
-    if left["reported_collector_id"] == right["reported_collector_id"]:
+    if (
+        left["report_present"]
+        and right["report_present"]
+        and left["reported_collector_id"] == right["reported_collector_id"]
+    ):
         issues.append(_issue("critical", "collector_identity_duplicate", "两份报告使用相同节点标识"))
 
     left_policy = left["quality_policy_sha256"]
     right_policy = right["quality_policy_sha256"]
-    if not left_policy or not right_policy:
-        issues.append(_issue("unknown", "quality_policy_missing", "至少一侧缺少质量策略摘要"))
-    elif left_policy != right_policy:
+    if left["report_present"] and right["report_present"] and left_policy != right_policy:
         issues.append(_issue("attention", "quality_policy_mismatch", "两台服务器使用的质量策略不同"))
 
     source_health = []
-    for source_id in sorted(set(left["source_health"]) | set(right["source_health"])):
+    compared_source_ids = (
+        sorted(set(left["source_health"]) | set(right["source_health"]))
+        if left["report_present"] and right["report_present"]
+        else []
+    )
+    for source_id in compared_source_ids:
         left_status = left["source_health"].get(source_id, "missing")
         right_status = right["source_health"].get(source_id, "missing")
         source_health.append(
