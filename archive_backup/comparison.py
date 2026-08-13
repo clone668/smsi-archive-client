@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from .config import ClientConfig, ProfileConfig
 from .protocol import parse_manifest
+from .reporting import runtime_report_summary
 from .verifier import local_object_path, verify_runtime_report
 
 
@@ -73,6 +74,7 @@ def _load_verified_archive(
         for item in (report.get("collection_sources") or {}).get("sources") or []
         if isinstance(item, Mapping)
     }
+    report_summary = runtime_report_summary(report) if report else {}
     return {
         "profile_id": profile.profile_id,
         "collector_id": profile.collector_id,
@@ -81,7 +83,8 @@ def _load_verified_archive(
         "manifest": snapshot,
         "report": report,
         "report_present": bool(report),
-        "overall_status": str(report.get("overall_status") or "unknown"),
+        "overall_status": str(report_summary.get("status") or "unknown"),
+        "report_summary": report_summary,
         "quality_policy_sha256": str(
             ((report.get("collection_sources") or {}).get("quality_policy") or {}).get(
                 "sha256"
@@ -115,12 +118,17 @@ def compare_archives(
             )
             issues.append(issue)
             data_issues.append(issue)
-        status = side["overall_status"]
-        if side["report_present"] and status != "healthy":
+        report_summary = side.get("report_summary") or {}
+        data_quality_status = str(report_summary.get("data_quality_status") or "")
+        if (
+            side["report_present"]
+            and report_summary.get("assessment_classification") == "current"
+            and data_quality_status != "healthy"
+        ):
             issue = _issue(
-                status if status in {"critical", "attention"} else "unknown",
-                f"report_status:{side['profile_id']}",
-                f"24 小时报告状态为 {status}",
+                data_quality_status,
+                f"report_data_quality:{side['profile_id']}",
+                f"当日数据质量为 {data_quality_status}",
             )
             issues.append(issue)
             report_issues.append(issue)
@@ -135,7 +143,11 @@ def compare_archives(
 
     left_policy = left["quality_policy_sha256"]
     right_policy = right["quality_policy_sha256"]
-    if left["report_present"] and right["report_present"] and left_policy != right_policy:
+    both_reports_current = (
+        left.get("report_summary", {}).get("assessment_classification") == "current"
+        and right.get("report_summary", {}).get("assessment_classification") == "current"
+    )
+    if both_reports_current and left_policy != right_policy:
         issue = _issue("attention", "quality_policy_mismatch", "两台服务器使用的质量策略不同")
         issues.append(issue)
         report_issues.append(issue)
@@ -152,6 +164,8 @@ def compare_archives(
         source_health.append(
             {"source_id": source_id, "left": left_status, "right": right_status}
         )
+        if not both_reports_current:
+            continue
         if "critical" in {left_status, right_status}:
             severity = "critical"
         elif left_status != right_status or "attention" in {left_status, right_status}:
@@ -195,11 +209,6 @@ def compare_archives(
         )
         issues.append(issue)
         data_issues.append(issue)
-    status = min(
-        (item["severity"] for item in issues),
-        key=lambda value: STATUS_ORDER[value],
-        default="healthy",
-    )
     data_status = min(
         (item["severity"] for item in data_issues),
         key=lambda value: STATUS_ORDER[value],
@@ -210,7 +219,7 @@ def compare_archives(
         "pair_id": "__".join(sorted((left["profile_id"], right["profile_id"]))),
         "left_profile_id": left["profile_id"],
         "right_profile_id": right["profile_id"],
-        "status": status,
+        "status": data_status,
         "data_status": data_status,
         "data_issues": data_issues,
         "report_issues": report_issues,
@@ -225,6 +234,10 @@ def compare_archives(
         "report_status": {
             "left": left["overall_status"] if left["report_present"] else "missing",
             "right": right["overall_status"] if right["report_present"] else "missing",
+        },
+        "report_summary": {
+            "left": left.get("report_summary") or {},
+            "right": right.get("report_summary") or {},
         },
         "business_inventory": {
             "left": left["business_inventory"],

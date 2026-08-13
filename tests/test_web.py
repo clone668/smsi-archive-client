@@ -36,10 +36,11 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'id="transfer-dock"' in page
         assert '<span>未完成</span>' in page
         assert '<th>数据对比</th>' in page
-        assert '<th>运行报告</th>' in page
+        assert '<th>归档日数据质量</th>' in page
         script = (
             Path(__file__).resolve().parents[1] / "static" / "app.js"
         ).read_text(encoding="utf-8")
+        assert 'replace("smsi-runtime-health-assessment/", "")' in script
         assert '"归档状态检查"' in script
         assert '"状态检查中"' in script
         assert 'checking ? "停止检查" : "取消任务"' in script

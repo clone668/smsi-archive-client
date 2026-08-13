@@ -49,7 +49,106 @@ def test_verified_directory_downloads_and_publishes_atomically(tmp_path, archive
     day = database.day("collector-a", "2026-08-07")
     assert day["status"] == "verified"
     assert day["report_summary"]["status"] == "healthy"
+    assert day["report_summary"]["assessment_classification"] == "historical"
     assert day["report_summary"]["source_counts"] == {"healthy": 1}
+
+
+def test_runtime_report_summary_keeps_historical_rules_out_of_current_alerts(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, _profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
+    report["overall_status"] = "attention"
+    report["summary"] = {"issue_count": 3, "top_issues": []}
+    raw = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fixture["report_path"].write_bytes(raw)
+    report_item = fixture["manifest"]["objects"][1]
+    report_item["size_bytes"] = len(raw)
+    report_item["sha256"] = hashlib.sha256(raw).hexdigest()
+    manifest = fixture["manifest"]
+    manifest["objects"][1] = report_item
+    manifest_raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+    summary = manager._runtime_report_summary(
+        fixture["day_root"], parse_manifest(manifest_raw, fixture["archive_date"])
+    )
+
+    assert summary["assessment_classification"] == "historical"
+    assert summary["status"] == "attention"
+    assert summary["data_quality_status"] == ""
+
+
+def test_runtime_report_summary_exposes_current_data_quality_separately(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, _profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
+    report["overall_status"] = "attention"
+    report["assessment"] = {
+        "engine_version": "smsi-runtime-health-assessment/v4",
+        "outcomes": {
+            "contract_version": "smsi-runtime-health-outcomes/v1",
+            "data_quality": {"status": "healthy", "issue_count": 0},
+            "operational": {"status": "attention", "issue_count": 2},
+            "observations": {"count": 3},
+        },
+    }
+    raw = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fixture["report_path"].write_bytes(raw)
+    report_item = fixture["manifest"]["objects"][1]
+    report_item["size_bytes"] = len(raw)
+    report_item["sha256"] = hashlib.sha256(raw).hexdigest()
+    fixture["manifest"]["objects"][1] = report_item
+    manifest_raw = json.dumps(
+        fixture["manifest"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+    summary = manager._runtime_report_summary(
+        fixture["day_root"], parse_manifest(manifest_raw, fixture["archive_date"])
+    )
+
+    assert summary["assessment_classification"] == "current"
+    assert summary["data_quality_status"] == "healthy"
+    assert summary["operational_status"] == "attention"
+    assert summary["operational_issue_count"] == 2
+    assert summary["observation_count"] == 3
+
+
+def test_runtime_report_summary_requires_the_current_engine_version(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, _profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
+    report["assessment"] = {
+        "engine_version": "smsi-runtime-health-assessment/v3",
+        "outcomes": {
+            "contract_version": "smsi-runtime-health-outcomes/v1",
+            "data_quality": {"status": "critical", "issue_count": 1},
+            "operational": {"status": "healthy", "issue_count": 0},
+        },
+    }
+    raw = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fixture["report_path"].write_bytes(raw)
+    report_item = fixture["manifest"]["objects"][1]
+    report_item["size_bytes"] = len(raw)
+    report_item["sha256"] = hashlib.sha256(raw).hexdigest()
+    fixture["manifest"]["objects"][1] = report_item
+    manifest_raw = json.dumps(
+        fixture["manifest"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+    summary = manager._runtime_report_summary(
+        fixture["day_root"], parse_manifest(manifest_raw, fixture["archive_date"])
+    )
+
+    assert summary["assessment_classification"] == "historical"
+    assert summary["data_quality_status"] == ""
 
 
 def test_scan_removes_state_for_day_missing_remotely_and_locally(

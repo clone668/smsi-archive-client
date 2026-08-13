@@ -186,6 +186,10 @@ def test_report_attention_is_separate_from_healthy_data_comparison() -> None:
         "report": {},
         "report_present": True,
         "overall_status": "attention",
+        "report_summary": {
+            "assessment_classification": "historical",
+            "status": "attention",
+        },
         "quality_policy_sha256": "2" * 64,
         "source_health": {"source-a": "healthy"},
         "business_inventory": {"price_data": 1_430_397},
@@ -209,20 +213,55 @@ def test_report_attention_is_separate_from_healthy_data_comparison() -> None:
         },
     )
 
-    assert comparison["status"] == "attention"
+    assert comparison["status"] == "healthy"
     assert comparison["data_status"] == "healthy"
     assert comparison["data_issues"] == []
-    assert len(comparison["report_issues"]) == 2
-    assert all(
-        item["code"].startswith("report_status:")
-        for item in comparison["report_issues"]
-    )
+    assert comparison["report_issues"] == []
     assert comparison["record_difference"] == 185
     assert comparison["record_relative_difference"] == 0.000129
     assert comparison["report_status"] == {
         "left": "attention",
         "right": "attention",
     }
+
+
+def test_current_data_quality_remains_an_archive_comparison_alert() -> None:
+    common = {
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": True,
+        "overall_status": "attention",
+        "quality_policy_sha256": "2" * 64,
+        "source_health": {"source-a": "attention"},
+        "business_inventory": {"price_data": 100},
+        "record_count": 100,
+        "report_summary": {
+            "assessment_classification": "current",
+            "data_quality_status": "attention",
+            "status": "attention",
+        },
+    }
+    comparison = compare_archives(
+        "2026-08-13",
+        {
+            **common,
+            "profile_id": "left",
+            "collector_id": "collector-a",
+            "reported_collector_id": "collector-a",
+        },
+        {
+            **common,
+            "profile_id": "right",
+            "collector_id": "collector-b",
+            "reported_collector_id": "collector-b",
+        },
+    )
+
+    assert comparison["status"] == "healthy"
+    assert any(
+        item["code"].startswith("report_data_quality:")
+        for item in comparison["report_issues"]
+    )
 
 
 def test_scan_removes_comparison_for_deleted_archive_day(

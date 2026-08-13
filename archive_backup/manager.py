@@ -6,7 +6,6 @@ import os
 import shutil
 import threading
 import time
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -22,6 +21,7 @@ from .protocol import (
     parse_manifest,
     parse_progress,
 )
+from .reporting import runtime_report_summary
 from .sources import ArchiveSource, build_source, split_bandwidth_limit
 from .verifier import (
     OperationCancelled,
@@ -119,37 +119,7 @@ class ArchiveManager:
         report = read_json(report_path, 4 * 1024 * 1024)
         if not report:
             return {}
-        collection = report.get("collection_sources")
-        collection = collection if isinstance(collection, Mapping) else {}
-        sources = collection.get("sources")
-        sources = sources if isinstance(sources, list) else []
-        source_counts = Counter(
-            str((item.get("quality") or {}).get("status") or "unknown")
-            for item in sources
-            if isinstance(item, Mapping) and isinstance(item.get("quality"), Mapping)
-        )
-        summary = report.get("summary")
-        summary = summary if isinstance(summary, Mapping) else {}
-        raw_issues = summary.get("top_issues")
-        raw_issues = raw_issues if isinstance(raw_issues, list) else []
-        issue_counts = summary.get("issue_counts")
-        top_issues = [
-            {
-                "severity": str(item.get("severity") or "unknown"),
-                "title": str(item.get("title") or item.get("code") or ""),
-                "action": str(item.get("action") or ""),
-            }
-            for item in raw_issues[:3]
-            if isinstance(item, Mapping)
-        ]
-        return {
-            "status": str(report.get("overall_status") or "unknown"),
-            "issue_count": int(summary.get("issue_count") or 0),
-            "issue_counts": dict(issue_counts) if isinstance(issue_counts, Mapping) else {},
-            "source_counts": dict(source_counts),
-            "top_issues": top_issues,
-            "generated_at": str(report.get("generated_at") or ""),
-        }
+        return runtime_report_summary(report)
 
     def _report_summary_json(
         self, root: Path, snapshot: ManifestSnapshot
