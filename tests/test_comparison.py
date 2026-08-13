@@ -249,6 +249,28 @@ def test_scan_removes_comparison_for_deleted_archive_day(
     assert database.comparisons() == []
 
 
+def test_scan_all_reconciles_every_profile_before_inspecting_days(
+    tmp_path: Path,
+    archive_fixture,
+    monkeypatch,
+) -> None:
+    fixture = archive_fixture()
+    config = _two_profile_config(tmp_path, fixture)
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    right_profile = config.profiles[1]
+    database.upsert_day(right_profile.profile_id, "2026-08-08", status="ready")
+
+    def inspect_day(*_args, **_kwargs):
+        assert database.day(right_profile.profile_id, "2026-08-08") is None
+        return None
+
+    monkeypatch.setattr(manager, "inspect_day", inspect_day)
+    results = manager.scan_all(download=False)
+
+    assert results[1]["stale_removed"] == 1
+
+
 def test_reportless_archives_compare_business_data_without_warning(
     tmp_path: Path,
     archive_fixture,

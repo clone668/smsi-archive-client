@@ -195,7 +195,9 @@ class ArchiveService:
         )
         if action in {"scan", "scan_download"}:
             results = manager.scan_all(download=action == "scan_download")
-            return f"已检查 {sum(item['dates'] for item in results)} 个日期"
+            removed = sum(item.get("stale_removed", 0) for item in results)
+            detail = f"已检查 {sum(item['dates'] for item in results)} 个日期"
+            return f"{detail}，清理 {removed} 条陈旧状态" if removed else detail
         if action == "download":
             manager.download_specific(
                 arguments["profile_id"], arguments["archive_date"]
@@ -261,6 +263,8 @@ class ArchiveService:
                 "eta_seconds": progress.get("eta_seconds"),
                 "current_object": current_object,
                 "detail": {
+                    "discovering": "正在读取远端归档日期清单",
+                    "scanning": "正在检查远端归档日期与本地状态",
                     "downloading": "正在下载并逐对象校验",
                     "verifying": "正在执行完整恢复校验",
                     "verified": "归档已经完整验证",
@@ -338,6 +342,12 @@ class ArchiveService:
                     if not queued_job or queued_job.get("status") != "queued":
                         pending = None
                     else:
+                        starting_detail = {
+                            "scan": "正在检查网盘归档状态",
+                            "scan_download": "正在检查归档状态与可同步日期",
+                            "download": "正在准备指定日期下载",
+                            "verify": "正在准备重新校验",
+                        }.get(action, "任务已启动")
                         self._cancel.clear()
                         self._current_job_id = job_id
                         self.database.update_job(
@@ -345,14 +355,14 @@ class ArchiveService:
                             status="running",
                             phase="starting",
                             started_at=started_at,
-                            detail="任务已启动",
+                            detail=starting_detail,
                             error="",
                             cancel_requested=0,
                         )
                         self._state.update(
                             running=True,
                             action=action,
-                            detail="任务已启动",
+                            detail=starting_detail,
                             started_at=started_at,
                             last_error="",
                             progress={},

@@ -1319,12 +1319,26 @@ class ArchiveManager:
             "eta_seconds": None,
         })
 
-    def scan_profile(self, profile: ProfileConfig, *, download: bool) -> dict[str, Any]:
-        source = build_source(self.config, profile)
-        dates = self._eligible_dates(source)
+    def _scan_profile_dates(
+        self,
+        profile: ProfileConfig,
+        source: ArchiveSource,
+        dates: list[str],
+        *,
+        download: bool,
+        stale_removed: int,
+    ) -> dict[str, Any]:
+        self._emit_progress({
+            "phase": "scanning",
+            "profile_id": profile.profile_id,
+            "archive_date": "",
+            "scan_dates_total": len(dates),
+            "scan_dates_done": 0,
+            "current_object": "",
+        })
         completed = 0
         failed = 0
-        for archive_date in dates:
+        for index, archive_date in enumerate(dates, start=1):
             raise_if_cancelled(self.cancel)
             try:
                 report = self.inspect_day(profile, source, archive_date, download=download)
@@ -1343,7 +1357,14 @@ class ArchiveManager:
                     "error", "归档处理失败", profile_id=profile.profile_id,
                     archive_date=archive_date, detail=str(exc),
                 )
-        stale_removed = self._reconcile_profile_days(profile, set(dates))
+            self._emit_progress({
+                "phase": "scanning",
+                "profile_id": profile.profile_id,
+                "archive_date": archive_date,
+                "scan_dates_total": len(dates),
+                "scan_dates_done": index,
+                "current_object": "",
+            })
         return {
             "profile_id": profile.profile_id,
             "dates": len(dates),
@@ -1351,6 +1372,20 @@ class ArchiveManager:
             "failed": failed,
             "stale_removed": stale_removed,
         }
+
+    def scan_profile(self, profile: ProfileConfig, *, download: bool) -> dict[str, Any]:
+        source = build_source(self.config, profile)
+        dates = self._eligible_dates(source)
+        stale_removed = self._reconcile_profile_days(profile, set(dates))
+        if stale_removed:
+            self.refresh_comparisons()
+        return self._scan_profile_dates(
+            profile,
+            source,
+            dates,
+            download=download,
+            stale_removed=stale_removed,
+        )
 
     def download_specific(self, profile_id: str, archive_date: str) -> dict[str, Any]:
         profile = next(
@@ -1381,24 +1416,71 @@ class ArchiveManager:
         return result
 
     def scan_all(self, *, download: bool) -> list[dict[str, Any]]:
-        results = []
+        prepared: list[
+            tuple[ProfileConfig, ArchiveSource, list[str], int] | dict[str, Any]
+        ] = []
+        stale_removed_any = False
         for profile in self.config.profiles:
             if profile.enabled:
                 try:
-                    results.append(self.scan_profile(profile, download=download))
+                    self._emit_progress({
+                        "phase": "discovering",
+                        "profile_id": profile.profile_id,
+                        "archive_date": "",
+                        "current_object": "",
+                    })
+                    source = build_source(self.config, profile)
+                    dates = self._eligible_dates(source)
+                    stale_removed = self._reconcile_profile_days(
+                        profile, set(dates)
+                    )
+                    stale_removed_any = stale_removed_any or bool(stale_removed)
+                    prepared.append((profile, source, dates, stale_removed))
                 except OperationCancelled:
                     raise
                 except Exception as exc:
-                    results.append({
+                    prepared.append({
                         "profile_id": profile.profile_id,
                         "dates": 0,
                         "completed": 0,
                         "failed": 1,
+                        "stale_removed": 0,
                     })
                     self.database.event(
                         "error", "归档来源检查失败",
                         profile_id=profile.profile_id, detail=str(exc),
                     )
+        if stale_removed_any:
+            # Remove stale comparisons before any slower per-day verification.
+            self.refresh_comparisons()
+        results = []
+        for item in prepared:
+            if isinstance(item, dict):
+                results.append(item)
+                continue
+            profile, source, dates, stale_removed = item
+            try:
+                results.append(self._scan_profile_dates(
+                    profile,
+                    source,
+                    dates,
+                    download=download,
+                    stale_removed=stale_removed,
+                ))
+            except OperationCancelled:
+                raise
+            except Exception as exc:
+                results.append({
+                    "profile_id": profile.profile_id,
+                    "dates": len(dates),
+                    "completed": 0,
+                    "failed": 1,
+                    "stale_removed": stale_removed,
+                })
+                self.database.event(
+                    "error", "归档来源检查失败",
+                    profile_id=profile.profile_id, detail=str(exc),
+                )
         self.refresh_comparisons()
         return results
 

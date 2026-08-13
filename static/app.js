@@ -106,11 +106,12 @@
   function renderMetrics() {
     const runtime = state.runtime || {};
     const currentJob = activeJob();
+    const checking = ["discovering", "scanning"].includes(runtime.progress?.phase);
     const verified = state.days.filter(item => item.status === "verified");
     const bad = state.days.filter(item => ["error", "remote_failed", "manifest_changed"].includes(item.status));
     const pending = state.days.filter(item => !["verified", "error", "remote_failed", "manifest_changed"].includes(item.status));
-    $("#metric-runtime").textContent = runtime.running ? "执行中" : currentJob ? "排队中" : (runtime.auto_download ? "自动运行" : "已暂停");
-    $("#metric-runtime-detail").textContent = runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
+    $("#metric-runtime").textContent = checking ? "检查中" : runtime.running ? "执行中" : currentJob ? "排队中" : (runtime.auto_download ? "自动运行" : "已暂停");
+    $("#metric-runtime-detail").textContent = checking ? "正在核对远端、本地与客户端状态" : runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
     $("#metric-verified").textContent = String(verified.length);
     $("#metric-latest").textContent = verified.length ? `最新 ${verified.map(item => item.archive_date).sort().at(-1)}` : "尚无本地归档";
     $("#metric-pending").textContent = String(pending.length + bad.length);
@@ -124,9 +125,10 @@
     const storageBar = $("#sidebar-storage-bar");
     storageBar.style.width = `${ratio}%`;
     storageBar.className = ratio >= 92 ? "bad" : ratio >= 80 ? "warn" : "";
-    $("#connection-state").textContent = runtime.running ? "任务执行中" : "客户端在线";
+    $("#connection-state").textContent = checking ? "状态检查中" : runtime.running ? "任务执行中" : "客户端在线";
     $("#connection-state").className = "status-dot good";
     $("#cancel-task").classList.toggle("hidden", !activeJob());
+    $("#cancel-task").textContent = checking ? "停止检查" : "取消任务";
     $("#scan-only").disabled = taskBusy();
     $("#scan-download").disabled = taskBusy();
   }
@@ -143,50 +145,60 @@
 
   function progressValues(job, progress) {
     const value = progress && Object.keys(progress).length ? progress : job || {};
+    const scanning = ["discovering", "scanning"].includes(value.phase);
     const total = Number(value.bytes_total || 0);
     const done = Number(value.bytes_transferred ?? value.bytes_done ?? 0);
     const objects = Number(value.object_count || 0);
     const objectsDone = Number(value.objects_done || 0);
-    const percent = total ? Math.max(0, Math.min(100, done / total * 100)) : objects ? Math.max(0, Math.min(100, objectsDone / objects * 100)) : 0;
-    return { value, total, done, objects, objectsDone, percent };
+    const scanTotal = Number(value.scan_dates_total || 0);
+    const scanDone = Number(value.scan_dates_done || 0);
+    const percent = scanning && scanTotal
+      ? Math.max(0, Math.min(100, scanDone / scanTotal * 100))
+      : total ? Math.max(0, Math.min(100, done / total * 100))
+      : objects ? Math.max(0, Math.min(100, objectsDone / objects * 100)) : 0;
+    return { value, total, done, objects, objectsDone, percent, scanning, scanTotal, scanDone };
   }
 
   function renderTaskPanel(prefix, job, progress) {
     const values = progressValues(job, progress);
     const live = values.value;
     const active = job && ["queued", "running", "cancelling"].includes(job.status);
-    const [label, tone] = job
+    const [label, tone] = values.scanning
+      ? ["检查中", "warn"]
+      : job
       ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
       : ["空闲", ""];
     if (prefix === "overview-job") {
-      $("#overview-job-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
+      $("#overview-job-title").textContent = values.scanning ? "归档状态检查" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
       $("#overview-job-detail").textContent = job
-        ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : progress.phase === "downloading" ? "正在下载并校验对象" : job.detail || "等待后台任务")
+        ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.phase === "discovering" ? `正在读取远端归档日期清单${live.profile_id ? ` · ${live.profile_id}` : ""}` : values.scanning ? `正在检查远端归档日期与本地状态${live.profile_id ? ` · ${live.profile_id}` : ""}` : progress.phase === "downloading" ? "正在下载并校验对象" : job.detail || "等待后台任务")
         : "自动检查会在计划时间运行";
       $("#overview-job-state").textContent = label;
       $("#overview-job-state").className = `state-pill ${tone}`;
-      $("#overview-job-object").textContent = live.current_object ? live.current_object.split("/").at(-1) : (job?.archive_date || "等待任务");
+      $("#overview-job-object").textContent = values.scanning
+        ? (live.phase === "discovering" ? "读取归档日期清单" : live.archive_date ? `检查 ${live.archive_date}` : "准备检查归档日期")
+        : live.current_object ? live.current_object.split("/").at(-1) : (job?.archive_date || "等待任务");
       $("#overview-job-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "--";
       $("#overview-job-progress").style.width = `${values.percent}%`;
-      $("#overview-job-objects").textContent = `对象 ${values.objectsDone}/${values.objects || "--"}`;
-      $("#overview-job-bytes").textContent = `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
+      $("#overview-job-objects").textContent = values.scanning ? `日期 ${values.scanDone}/${values.scanTotal || "--"}` : `对象 ${values.objectsDone}/${values.objects || "--"}`;
+      $("#overview-job-bytes").textContent = values.scanning ? "数据 无需传输" : `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
       $("#overview-job-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
       $("#overview-job-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
       $("#overview-job-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
       $("#overview-job-limit").textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
       return;
     }
-    $("#jobs-active-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
+    $("#jobs-active-title").textContent = values.scanning ? "归档状态检查" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
     $("#jobs-active-detail").textContent = job
-      ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.current_object || job.detail || "等待后台任务")
+      ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.phase === "discovering" ? `正在读取 ${live.profile_id || "采集服务器"} 的远端日期清单` : values.scanning ? `正在核对 ${live.archive_date || live.profile_id || "归档日期"}` : live.current_object || job.detail || "等待后台任务")
       : "等待自动检查或手动操作";
     $("#jobs-active-state").textContent = label;
     $("#jobs-active-state").className = `state-pill ${tone}`;
-    $("#jobs-current-object").textContent = live.current_object || job?.archive_date || "--";
+    $("#jobs-current-object").textContent = values.scanning ? (live.archive_date || "读取日期清单") : live.current_object || job?.archive_date || "--";
     $("#jobs-progress-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "0%";
     $("#jobs-progress-bar").style.width = `${values.percent}%`;
-    $("#jobs-progress-objects").textContent = `对象 ${values.objectsDone}/${values.objects || "--"}`;
-    $("#jobs-progress-bytes").textContent = `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
+    $("#jobs-progress-objects").textContent = values.scanning ? `日期 ${values.scanDone}/${values.scanTotal || "--"}` : `对象 ${values.objectsDone}/${values.objects || "--"}`;
+    $("#jobs-progress-bytes").textContent = values.scanning ? "数据 无需传输" : `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
     $("#jobs-progress-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
     $("#jobs-progress-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
     $("#jobs-progress-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
@@ -217,13 +229,15 @@
     const values = progressValues(job, progress);
     const live = values.value;
     const active = !!job && ["queued", "running", "cancelling"].includes(job.status);
-    const [statusLabel] = job
+    const [statusLabel] = values.scanning
+      ? ["检查中"]
+      : job
       ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
       : ["空闲", ""];
     $("#transfer-dock").classList.toggle("busy", active);
-    $("#transfer-dock-title").textContent = job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "传输空闲";
+    $("#transfer-dock-title").textContent = values.scanning ? "正在检查归档状态" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "传输空闲";
     $("#transfer-dock-detail").textContent = job
-      ? (live.current_object || job.archive_date || job.detail || "等待后台任务")
+      ? (values.scanning ? `${live.profile_id || "全部采集服务器"} · 日期 ${values.scanDone}/${values.scanTotal || "--"}` : live.current_object || job.archive_date || job.detail || "等待后台任务")
       : "等待自动检查或手动下载";
     $("#transfer-dock-state").textContent = statusLabel;
     $("#transfer-dock-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "0%";
@@ -231,7 +245,8 @@
     $("#transfer-dock-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
     $("#transfer-dock-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
     $("#transfer-cancel").classList.toggle("hidden", !active);
-    $("#nav-job-state").textContent = active ? `${statusLabel} ${values.percent.toFixed(0)}%` : "当前空闲";
+    $("#transfer-cancel").title = values.scanning ? "停止检查" : "取消任务";
+    $("#nav-job-state").textContent = active ? (values.scanning ? `状态检查 ${values.percent.toFixed(0)}%` : `${statusLabel} ${values.percent.toFixed(0)}%`) : "当前空闲";
   }
 
   function renderProfiles() {

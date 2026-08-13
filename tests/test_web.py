@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from archive_backup.config import ConfigStore
 from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.web import create_app
@@ -35,6 +37,12 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert '<span>未完成</span>' in page
         assert '<th>数据对比</th>' in page
         assert '<th>运行报告</th>' in page
+        script = (
+            Path(__file__).resolve().parents[1] / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        assert '"归档状态检查"' in script
+        assert '"状态检查中"' in script
+        assert 'checking ? "停止检查" : "取消任务"' in script
     finally:
         app.extensions["smsi_archive_service"].stop()
 

@@ -73,6 +73,25 @@ def test_scan_removes_state_for_day_missing_remotely_and_locally(
     assert database.day(profile.profile_id, fixture["archive_date"]) is not None
 
 
+def test_scan_reconciles_stale_state_before_inspecting_remote_days(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    database.upsert_day(profile.profile_id, "2026-08-08", status="ready")
+    manager = ArchiveManager(config, database)
+
+    def inspect_day(*_args, **_kwargs):
+        assert database.day(profile.profile_id, "2026-08-08") is None
+        return None
+
+    monkeypatch.setattr(manager, "inspect_day", inspect_day)
+    result = manager.scan_profile(profile, download=False)
+
+    assert result["stale_removed"] == 1
+
+
 def test_scan_preserves_state_when_local_partial_directory_exists(
     tmp_path, archive_fixture
 ) -> None:
@@ -121,8 +140,10 @@ def test_download_reports_byte_progress_without_changing_verification_gate(tmp_p
     manager.scan_profile(profile, download=True)
 
     assert any(item["phase"] == "downloading" and item["bytes_transferred"] > 0 for item in updates)
-    assert updates[-1]["phase"] == "verified"
-    assert updates[-1]["bytes_done"] == updates[-1]["bytes_total"]
+    verified = next(item for item in updates if item["phase"] == "verified")
+    assert verified["bytes_done"] == verified["bytes_total"]
+    assert updates[-1]["phase"] == "scanning"
+    assert updates[-1]["scan_dates_done"] == updates[-1]["scan_dates_total"]
 
 
 def test_verified_directory_ignores_unverified_source_day(tmp_path, archive_fixture) -> None:

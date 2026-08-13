@@ -154,6 +154,32 @@ def test_verification_progress_does_not_downgrade_completed_object(tmp_path) -> 
     assert item["bytes_done"] == 100
 
 
+def test_scanning_progress_is_exposed_without_transfer_counters(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+    job = database.create_job("scan_download")
+
+    service._update_progress(job["id"], {
+        "phase": "scanning",
+        "profile_id": "collector-a",
+        "archive_date": "2026-08-12",
+        "scan_dates_total": 4,
+        "scan_dates_done": 2,
+        "current_object": "",
+    })
+
+    status = service.status()
+    persisted = database.job(job["id"])
+    assert status["progress"]["phase"] == "scanning"
+    assert status["progress"]["scan_dates_total"] == 4
+    assert status["progress"]["scan_dates_done"] == 2
+    assert persisted["detail"] == "正在检查远端归档日期与本地状态"
+    assert persisted["object_count"] == 0
+    assert persisted["bytes_total"] == 0
+
+
 def test_queued_job_can_be_cancelled_before_worker_starts(tmp_path) -> None:
     store = ConfigStore(tmp_path / "state")
     store.load()
