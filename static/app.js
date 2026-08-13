@@ -111,7 +111,7 @@
     const bad = state.days.filter(item => ["error", "remote_failed", "manifest_changed"].includes(item.status));
     const pending = state.days.filter(item => !["verified", "error", "remote_failed", "manifest_changed"].includes(item.status));
     $("#metric-runtime").textContent = checking ? "检查中" : runtime.running ? "执行中" : currentJob ? "排队中" : (runtime.auto_download ? "自动运行" : "已暂停");
-    $("#metric-runtime-detail").textContent = checking ? "正在核对远端、本地与客户端状态" : runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
+    $("#metric-runtime-detail").textContent = checking ? "正在发现新归档与异常状态" : runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
     $("#metric-verified").textContent = String(verified.length);
     $("#metric-latest").textContent = verified.length ? `最新 ${verified.map(item => item.archive_date).sort().at(-1)}` : "尚无本地归档";
     $("#metric-pending").textContent = String(pending.length + bad.length);
@@ -140,7 +140,7 @@
   };
 
   function jobLabel(job) {
-    return ({ scan: "检查网盘", scan_download: "自动同步", download: "指定日期下载", verify: "重新校验" }[job?.action] || job?.action || "任务");
+    return ({ scan: "检查新归档", scan_download: "自动同步", download: "指定日期下载", verify: "重新校验" }[job?.action] || job?.action || "任务");
   }
 
   function progressValues(job, progress) {
@@ -1120,7 +1120,7 @@
   }
 
   async function runScan(download) {
-    try { await api("/api/actions/scan", { method: "POST", body: JSON.stringify({ download }) }); toast(download ? "同步任务已加入队列" : "检查任务已加入队列"); await refresh(); }
+    try { await api("/api/actions/scan", { method: "POST", body: JSON.stringify({ download }) }); toast(download ? "增量同步已加入队列" : "新归档检查已加入队列"); await refresh(); }
     catch (error) { toast(error.message, true); }
   }
 

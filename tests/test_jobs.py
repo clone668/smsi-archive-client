@@ -175,7 +175,7 @@ def test_scanning_progress_is_exposed_without_transfer_counters(tmp_path) -> Non
     assert status["progress"]["phase"] == "scanning"
     assert status["progress"]["scan_dates_total"] == 4
     assert status["progress"]["scan_dates_done"] == 2
-    assert persisted["detail"] == "正在检查远端归档日期与本地状态"
+    assert persisted["detail"] == "正在增量处理新归档或异常状态"
     assert persisted["object_count"] == 0
     assert persisted["bytes_total"] == 0
 

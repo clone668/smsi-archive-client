@@ -41,6 +41,7 @@ class StateDatabase:
                     bytes_total INTEGER NOT NULL DEFAULT 0,
                     bytes_done INTEGER NOT NULL DEFAULT 0,
                     report_summary TEXT NOT NULL DEFAULT '',
+                    remote_checked_at TEXT NOT NULL DEFAULT '',
                     detail TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
@@ -130,6 +131,10 @@ class StateDatabase:
             if "report_summary" not in columns:
                 connection.execute(
                     "ALTER TABLE archive_days ADD COLUMN report_summary TEXT NOT NULL DEFAULT ''"
+                )
+            if "remote_checked_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE archive_days ADD COLUMN remote_checked_at TEXT NOT NULL DEFAULT ''"
                 )
 
     def create_job(
@@ -384,6 +389,7 @@ class StateDatabase:
             "bytes_total",
             "bytes_done",
             "report_summary",
+            "remote_checked_at",
             "detail",
             "error",
         }
@@ -421,6 +427,16 @@ class StateDatabase:
             rows = connection.execute(
                 "SELECT * FROM archive_days ORDER BY archive_date DESC, profile_id LIMIT ?",
                 (bounded,),
+            ).fetchall()
+        return [self._decode_day(row) for row in rows]
+
+    def profile_days(self, profile_id: str, limit: int = 5000) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 5000))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM archive_days WHERE profile_id=? "
+                "ORDER BY archive_date DESC LIMIT ?",
+                (str(profile_id)[:64], bounded),
             ).fetchall()
         return [self._decode_day(row) for row in rows]
 

@@ -92,6 +92,152 @@ def test_scan_reconciles_stale_state_before_inspecting_remote_days(
     assert result["stale_removed"] == 1
 
 
+def test_incremental_scan_skips_a_previously_verified_day(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+
+    monkeypatch.setattr(
+        manager,
+        "inspect_day",
+        lambda *_args, **_kwargs: pytest.fail(
+            "incremental scan must not inspect a verified archive again"
+        ),
+    )
+
+    result = manager.scan_profile(
+        profile,
+        download=True,
+        audit_verified=False,
+        incremental=True,
+    )
+
+    assert result["discovered"] == 1
+    assert result["dates"] == 0
+    assert result["skipped_verified"] == 1
+
+
+def test_incremental_scan_reprocesses_day_when_local_receipt_is_missing(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    (manager.final_root(profile, fixture["archive_date"]) / ".smsi-verified.json").unlink()
+    inspected: list[str] = []
+
+    def inspect_day(_profile, _source, archive_date, *, download):
+        inspected.append(archive_date)
+        return None
+
+    monkeypatch.setattr(manager, "inspect_day", inspect_day)
+    result = manager.scan_profile(
+        profile,
+        download=True,
+        audit_verified=False,
+        incremental=True,
+    )
+
+    assert inspected == [fixture["archive_date"]]
+    assert result["dates"] == 1
+    assert result["skipped_verified"] == 0
+
+
+def test_manifest_audit_is_bounded_per_profile_and_rate_limited(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    first = archive_fixture("2026-08-07")
+    second = archive_fixture("2026-08-08")
+    config, profile = make_config(tmp_path, first["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    database.upsert_day(
+        profile.profile_id,
+        first["archive_date"],
+        status="verified",
+        remote_checked_at="",
+    )
+    database.upsert_day(
+        profile.profile_id,
+        second["archive_date"],
+        status="verified",
+        remote_checked_at="",
+    )
+    audited: list[str] = []
+
+    def audit(_profile, _source, archive_date):
+        audited.append(archive_date)
+        return {"status": "manifest_unchanged"}
+
+    monkeypatch.setattr(manager, "_audit_verified_manifest", audit)
+    first_result = manager.scan_profile(
+        profile, download=True, incremental=True
+    )
+    second_result = manager.scan_profile(
+        profile, download=True, incremental=True
+    )
+
+    assert audited == ["2026-08-08"]
+    assert first_result["manifest_audits"] == 1
+    assert first_result["dates"] == 1
+    assert second_result["manifest_audits"] == 0
+    assert second_result["dates"] == 0
+
+
+def test_manifest_audit_failure_keeps_verified_archive_state(
+    tmp_path, archive_fixture, monkeypatch
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+
+    class UnavailableSource:
+        name = "unavailable"
+
+        def read_small(self, *_args, **_kwargs):
+            raise RuntimeError("temporary remote failure")
+
+    result = manager._audit_verified_manifest(
+        profile, UnavailableSource(), fixture["archive_date"]
+    )
+
+    assert result is None
+    assert database.day(profile.profile_id, fixture["archive_date"])["status"] == "verified"
+    assert database.events(1)[0]["event"] == "历史归档清单巡检未完成"
+
+
+def test_manifest_audit_detects_invalid_local_receipt(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_profile(profile, download=True)
+    receipt = manager.final_root(profile, fixture["archive_date"]) / ".smsi-verified.json"
+    receipt.write_text("{}", encoding="utf-8")
+
+    result = manager._audit_verified_manifest(
+        profile,
+        VerifiedDirectorySource(profile),
+        fixture["archive_date"],
+    )
+
+    assert result is None
+    row = database.day(profile.profile_id, fixture["archive_date"])
+    assert row["status"] == "error"
+    assert "重新校验" in row["error"]
+
+
 def test_scan_preserves_state_when_local_partial_directory_exists(
     tmp_path, archive_fixture
 ) -> None:

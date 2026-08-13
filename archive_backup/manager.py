@@ -32,6 +32,11 @@ from .verifier import (
 )
 
 
+MANIFEST_AUDIT_RECENT_DATES = 14
+MANIFEST_AUDIT_INTERVAL = timedelta(days=7)
+MANIFEST_AUDIT_BATCH_PER_PROFILE = 1
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -170,7 +175,8 @@ class ArchiveManager:
         today = datetime.now(timezone.utc).date()
         cutoff = today - timedelta(days=self.config.history_days)
         dates = []
-        for value in source.list_dates():
+        discover = getattr(source, "discover_dates", source.list_dates)
+        for value in discover():
             if not DATE_RE.fullmatch(value):
                 continue
             try:
@@ -180,6 +186,89 @@ class ArchiveManager:
             if cutoff <= parsed <= today:
                 dates.append(value)
         return sorted(dates)
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _verified_controls_are_present(
+        self,
+        profile: ProfileConfig,
+        archive_date: str,
+        row: Mapping[str, Any],
+    ) -> bool:
+        final = self.final_root(profile, archive_date)
+        return bool(
+            row.get("status") == "verified"
+            and row.get("manifest_sha256")
+            and (final / ".smsi-verified.json").is_file()
+            and (final / "manifest.json").is_file()
+            and not (final / ".smsi-verification-failed.json").exists()
+        )
+
+    def _profile_manifest_audit_is_due(self, profile: ProfileConfig) -> bool:
+        checked_raw = str(
+            self.database.get_runtime(
+                f"manifest_audit_last_attempt:{profile.profile_id}", ""
+            )
+            or ""
+        )
+        if not checked_raw:
+            return True
+        try:
+            checked = datetime.fromisoformat(checked_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - checked >= MANIFEST_AUDIT_INTERVAL
+
+    def _manifest_audit_is_due(
+        self,
+        row: Mapping[str, Any],
+    ) -> bool:
+        checked_raw = str(row.get("remote_checked_at") or "")
+        if not checked_raw:
+            return True
+        try:
+            checked = datetime.fromisoformat(checked_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - checked >= MANIFEST_AUDIT_INTERVAL
+
+    def _select_scan_dates(
+        self,
+        profile: ProfileConfig,
+        dates: list[str],
+        *,
+        audit_verified: bool,
+    ) -> tuple[list[str], set[str]]:
+        pending: list[str] = []
+        audit_candidates: list[str] = []
+        rows = {
+            str(item.get("archive_date") or ""): item
+            for item in self.database.profile_days(profile.profile_id)
+        }
+        profile_audit_due = (
+            audit_verified and self._profile_manifest_audit_is_due(profile)
+        )
+        recent_dates = set(dates[-MANIFEST_AUDIT_RECENT_DATES:])
+        for archive_date in dates:
+            row = rows.get(archive_date, {})
+            if not self._verified_controls_are_present(profile, archive_date, row):
+                pending.append(archive_date)
+            elif (
+                profile_audit_due
+                and archive_date in recent_dates
+                and self._manifest_audit_is_due(row)
+            ):
+                audit_candidates.append(archive_date)
+        audits = set(
+            sorted(audit_candidates, reverse=True)[:MANIFEST_AUDIT_BATCH_PER_PROFILE]
+        )
+        return [*pending, *sorted(audits)], audits
 
     def _reconcile_profile_days(
         self,
@@ -781,6 +870,7 @@ class ArchiveManager:
                 profile.profile_id, archive_date, status=state, detail=detail, error="",
             )
             return None
+        checked_at = self._utc_now()
         try:
             receipt = self._verified_receipt(profile, archive_date, snapshot)
         except RuntimeError as exc:
@@ -805,11 +895,13 @@ class ArchiveManager:
                     bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
                     detail="清单维护已同步，恢复验证通过", error="",
                     report_summary=report_summary,
+                    remote_checked_at=checked_at,
                 )
                 return receipt
             self.database.upsert_day(
                 profile.profile_id, archive_date, status="manifest_changed",
                 manifest_sha256=snapshot.sha256, detail="需要人工复核", error=str(exc),
+                remote_checked_at=checked_at,
             )
             self.database.event(
                 "error", "远端 manifest 发生变化", profile_id=profile.profile_id,
@@ -828,6 +920,7 @@ class ArchiveManager:
                 bytes_done=sum(int(item["size_bytes"]) for item in snapshot.objects),
                 detail="本地已完整验证", error="",
                 report_summary=report_summary,
+                remote_checked_at=checked_at,
             )
             return receipt
         self.database.upsert_day(
@@ -835,9 +928,86 @@ class ArchiveManager:
             manifest_sha256=snapshot.sha256, object_count=snapshot.object_count,
             row_count=snapshot.row_count,
             bytes_total=sum(int(item["size_bytes"]) for item in snapshot.objects),
-            detail="可下载", error="",
+            detail="可下载", error="", remote_checked_at=checked_at,
         )
         return self.download_day(profile, source, snapshot) if download else None
+
+    def _audit_verified_manifest(
+        self,
+        profile: ProfileConfig,
+        source: ArchiveSource,
+        archive_date: str,
+    ) -> dict[str, Any] | None:
+        """Compare the remote manifest only; full local verification stays manual."""
+        row = self.database.day(profile.profile_id, archive_date) or {}
+        try:
+            snapshot, state, detail = self._remote_snapshot(
+                source, profile, archive_date
+            )
+        except Exception as exc:
+            self.database.event(
+                "info",
+                "历史归档清单巡检未完成",
+                profile_id=profile.profile_id,
+                archive_date=archive_date,
+                detail=str(exc),
+            )
+            return None
+        if snapshot is None:
+            self.database.event(
+                "info",
+                "历史归档清单巡检未完成",
+                profile_id=profile.profile_id,
+                archive_date=archive_date,
+                detail=f"{state}: {detail}",
+            )
+            return None
+        if snapshot.sha256 != str(row.get("manifest_sha256") or ""):
+            return self.inspect_day(
+                profile,
+                source,
+                archive_date,
+                download=False,
+            )
+        local_manifest = self.final_root(profile, archive_date) / "manifest.json"
+        local_receipt = read_json(
+            self.final_root(profile, archive_date) / ".smsi-verified.json"
+        )
+        if (
+            not local_manifest.is_file()
+            or sha256_file(local_manifest) != snapshot.sha256
+            or not local_receipt
+            or local_receipt.get("contract_version")
+            != "smsi-local-archive-verification/v1"
+            or local_receipt.get("status") != "verified"
+            or local_receipt.get("archive_date") != archive_date
+            or local_receipt.get("manifest_sha256") != snapshot.sha256
+        ):
+            self.database.upsert_day(
+                profile.profile_id,
+                archive_date,
+                status="error",
+                detail="本地 manifest 与已验证状态不一致",
+                error="请对该日期执行重新校验",
+                remote_checked_at=self._utc_now(),
+            )
+            self.database.event(
+                "error",
+                "本地归档清单校验失败",
+                profile_id=profile.profile_id,
+                archive_date=archive_date,
+                detail="本地 manifest 与远端已验证版本不一致",
+            )
+            return None
+        self.database.upsert_day(
+            profile.profile_id,
+            archive_date,
+            status="verified",
+            detail="本地已完整验证，远端清单未变化",
+            error="",
+            remote_checked_at=self._utc_now(),
+        )
+        return {"status": "manifest_unchanged"}
 
     def day_detail(self, profile_id: str, archive_date: str) -> dict[str, Any]:
         """Return a click-triggered remote manifest/local inventory snapshot."""
@@ -1327,6 +1497,8 @@ class ArchiveManager:
         *,
         download: bool,
         stale_removed: int,
+        discovered: int,
+        audit_dates: set[str],
     ) -> dict[str, Any]:
         self._emit_progress({
             "phase": "scanning",
@@ -1341,7 +1513,14 @@ class ArchiveManager:
         for index, archive_date in enumerate(dates, start=1):
             raise_if_cancelled(self.cancel)
             try:
-                report = self.inspect_day(profile, source, archive_date, download=download)
+                if archive_date in audit_dates:
+                    report = self._audit_verified_manifest(
+                        profile, source, archive_date
+                    )
+                else:
+                    report = self.inspect_day(
+                        profile, source, archive_date, download=download
+                    )
                 if report:
                     completed += 1
             except OperationCancelled:
@@ -1365,26 +1544,49 @@ class ArchiveManager:
                 "scan_dates_done": index,
                 "current_object": "",
             })
+        if audit_dates:
+            self.database.set_runtime(
+                f"manifest_audit_last_attempt:{profile.profile_id}",
+                self._utc_now(),
+            )
         return {
             "profile_id": profile.profile_id,
             "dates": len(dates),
+            "discovered": discovered,
+            "skipped_verified": max(0, discovered - len(dates)),
+            "manifest_audits": len(audit_dates),
             "completed": completed,
             "failed": failed,
             "stale_removed": stale_removed,
         }
 
-    def scan_profile(self, profile: ProfileConfig, *, download: bool) -> dict[str, Any]:
+    def scan_profile(
+        self,
+        profile: ProfileConfig,
+        *,
+        download: bool,
+        audit_verified: bool = True,
+        incremental: bool = False,
+    ) -> dict[str, Any]:
         source = build_source(self.config, profile)
         dates = self._eligible_dates(source)
         stale_removed = self._reconcile_profile_days(profile, set(dates))
         if stale_removed:
             self.refresh_comparisons()
+        if incremental:
+            selected, audit_dates = self._select_scan_dates(
+                profile, dates, audit_verified=audit_verified
+            )
+        else:
+            selected, audit_dates = dates, set()
         return self._scan_profile_dates(
             profile,
             source,
-            dates,
+            selected,
             download=download,
             stale_removed=stale_removed,
+            discovered=len(dates),
+            audit_dates=audit_dates,
         )
 
     def download_specific(self, profile_id: str, archive_date: str) -> dict[str, Any]:
@@ -1415,9 +1617,16 @@ class ArchiveManager:
         self.refresh_comparisons()
         return result
 
-    def scan_all(self, *, download: bool) -> list[dict[str, Any]]:
+    def scan_all(
+        self,
+        *,
+        download: bool,
+        audit_verified: bool = True,
+    ) -> list[dict[str, Any]]:
         prepared: list[
-            tuple[ProfileConfig, ArchiveSource, list[str], int] | dict[str, Any]
+            tuple[
+                ProfileConfig, ArchiveSource, list[str], int, int, set[str]
+            ] | dict[str, Any]
         ] = []
         stale_removed_any = False
         for profile in self.config.profiles:
@@ -1435,13 +1644,26 @@ class ArchiveManager:
                         profile, set(dates)
                     )
                     stale_removed_any = stale_removed_any or bool(stale_removed)
-                    prepared.append((profile, source, dates, stale_removed))
+                    selected, audit_dates = self._select_scan_dates(
+                        profile, dates, audit_verified=audit_verified
+                    )
+                    prepared.append((
+                        profile,
+                        source,
+                        selected,
+                        stale_removed,
+                        len(dates),
+                        audit_dates,
+                    ))
                 except OperationCancelled:
                     raise
                 except Exception as exc:
                     prepared.append({
                         "profile_id": profile.profile_id,
                         "dates": 0,
+                        "discovered": 0,
+                        "skipped_verified": 0,
+                        "manifest_audits": 0,
                         "completed": 0,
                         "failed": 1,
                         "stale_removed": 0,
@@ -1458,7 +1680,7 @@ class ArchiveManager:
             if isinstance(item, dict):
                 results.append(item)
                 continue
-            profile, source, dates, stale_removed = item
+            profile, source, dates, stale_removed, discovered, audit_dates = item
             try:
                 results.append(self._scan_profile_dates(
                     profile,
@@ -1466,6 +1688,8 @@ class ArchiveManager:
                     dates,
                     download=download,
                     stale_removed=stale_removed,
+                    discovered=discovered,
+                    audit_dates=audit_dates,
                 ))
             except OperationCancelled:
                 raise
@@ -1473,6 +1697,9 @@ class ArchiveManager:
                 results.append({
                     "profile_id": profile.profile_id,
                     "dates": len(dates),
+                    "discovered": discovered,
+                    "skipped_verified": max(0, discovered - len(dates)),
+                    "manifest_audits": len(audit_dates),
                     "completed": 0,
                     "failed": 1,
                     "stale_removed": stale_removed,
@@ -1566,6 +1793,7 @@ class ArchiveManager:
             status="verified",
             detail="重新恢复验证通过",
             report_summary=self._report_summary_json(root, snapshot),
+            remote_checked_at=self._utc_now(),
             error="",
         )
         self.database.event("info", "本地归档重新恢复验证完成", profile_id=profile_id, archive_date=archive_date)

@@ -89,6 +89,10 @@ class ArchiveSource(ABC):
     def list_dates(self) -> set[str]:
         raise NotImplementedError
 
+    def discover_dates(self) -> set[str]:
+        """Return candidate dates without performing per-day integrity checks."""
+        return self.list_dates()
+
     @abstractmethod
     def read_small(self, relative_key: str, maximum_bytes: int) -> bytes | None:
         raise NotImplementedError
@@ -313,6 +317,21 @@ class VerifiedDirectorySource(ArchiveSource):
         for item in self.root.iterdir():
             match = DATE_DIR_RE.fullmatch(item.name)
             if item.is_dir() and match and self._day_is_verified(match.group(1)):
+                dates.add(match.group(1))
+        return dates
+
+    def discover_dates(self) -> set[str]:
+        if not self.root.is_dir():
+            raise RuntimeError(f"已验证目录不可访问: {self.root}")
+        dates: set[str] = set()
+        for item in self.root.iterdir():
+            match = DATE_DIR_RE.fullmatch(item.name)
+            if (
+                item.is_dir()
+                and match
+                and (item / ".smsi-verified.json").is_file()
+                and (item / "manifest.json").is_file()
+            ):
                 dates.add(match.group(1))
         return dates
 

@@ -196,7 +196,15 @@ class ArchiveService:
         if action in {"scan", "scan_download"}:
             results = manager.scan_all(download=action == "scan_download")
             removed = sum(item.get("stale_removed", 0) for item in results)
-            detail = f"已检查 {sum(item['dates'] for item in results)} 个日期"
+            discovered = sum(item.get("discovered", 0) for item in results)
+            processed = sum(item.get("dates", 0) for item in results)
+            skipped = sum(item.get("skipped_verified", 0) for item in results)
+            audits = sum(item.get("manifest_audits", 0) for item in results)
+            detail = f"发现 {discovered} 个日期，增量处理 {processed} 个"
+            if skipped:
+                detail += f"，跳过 {skipped} 个已验证日期"
+            if audits:
+                detail += f"（含 {audits} 个清单巡检）"
             return f"{detail}，清理 {removed} 条陈旧状态" if removed else detail
         if action == "download":
             manager.download_specific(
@@ -264,7 +272,7 @@ class ArchiveService:
                 "current_object": current_object,
                 "detail": {
                     "discovering": "正在读取远端归档日期清单",
-                    "scanning": "正在检查远端归档日期与本地状态",
+                    "scanning": "正在增量处理新归档或异常状态",
                     "downloading": "正在下载并逐对象校验",
                     "verifying": "正在执行完整恢复校验",
                     "verified": "归档已经完整验证",
@@ -343,8 +351,8 @@ class ArchiveService:
                         pending = None
                     else:
                         starting_detail = {
-                            "scan": "正在检查网盘归档状态",
-                            "scan_download": "正在检查归档状态与可同步日期",
+                            "scan": "正在发现新归档与异常状态",
+                            "scan_download": "正在发现并同步新归档",
                             "download": "正在准备指定日期下载",
                             "verify": "正在准备重新校验",
                         }.get(action, "任务已启动")

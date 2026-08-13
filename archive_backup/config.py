@@ -199,7 +199,7 @@ class ClientConfig:
         if not 1 <= int(self.poll_minutes) <= 1440:
             errors.append("检查间隔必须为 1 至 1440 分钟")
         if not 1 <= int(self.history_days) <= 3660:
-            errors.append("历史扫描天数必须为 1 至 3660")
+            errors.append("归档发现范围必须为 1 至 3660 天")
         if not 1 <= int(self.download_workers) <= 8:
             errors.append("下载并发必须为 1 至 8")
         if int(self.minimum_free_bytes) < 1024 * 1024 * 1024:
