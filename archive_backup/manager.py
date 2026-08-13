@@ -181,6 +181,48 @@ class ArchiveManager:
                 dates.append(value)
         return sorted(dates)
 
+    def _reconcile_profile_days(
+        self,
+        profile: ProfileConfig,
+        remote_dates: set[str],
+    ) -> int:
+        """Remove state rows for monitored dates absent from every storage location."""
+        today = datetime.now(timezone.utc).date()
+        cutoff = today - timedelta(days=self.config.history_days)
+        profile_root = self.profile_root(profile)
+        partial_root = profile_root / ".partial"
+        local_dates = {
+            item.name.removeprefix("date=")
+            for root in (profile_root, partial_root)
+            if root.is_dir()
+            for item in root.glob("date=*")
+            if item.is_dir() and DATE_RE.fullmatch(item.name.removeprefix("date="))
+        }
+        stale_dates: set[str] = set()
+        for item in self.database.days(5000):
+            if item.get("profile_id") != profile.profile_id:
+                continue
+            archive_date = str(item.get("archive_date") or "")
+            try:
+                parsed = date.fromisoformat(archive_date)
+            except ValueError:
+                continue
+            if (
+                cutoff <= parsed <= today
+                and archive_date not in remote_dates
+                and archive_date not in local_dates
+            ):
+                stale_dates.add(archive_date)
+        removed = self.database.delete_days(profile.profile_id, stale_dates)
+        if removed:
+            self.database.event(
+                "info",
+                "已清理陈旧归档状态",
+                profile_id=profile.profile_id,
+                detail=f"{removed} 个已不存在的日期状态",
+            )
+        return removed
+
     def _remote_snapshot(
         self,
         source: ArchiveSource,
@@ -1301,7 +1343,14 @@ class ArchiveManager:
                     "error", "归档处理失败", profile_id=profile.profile_id,
                     archive_date=archive_date, detail=str(exc),
                 )
-        return {"profile_id": profile.profile_id, "dates": len(dates), "completed": completed, "failed": failed}
+        stale_removed = self._reconcile_profile_days(profile, set(dates))
+        return {
+            "profile_id": profile.profile_id,
+            "dates": len(dates),
+            "completed": completed,
+            "failed": failed,
+            "stale_removed": stale_removed,
+        }
 
     def download_specific(self, profile_id: str, archive_date: str) -> dict[str, Any]:
         profile = next(

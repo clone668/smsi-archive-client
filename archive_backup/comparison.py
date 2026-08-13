@@ -104,35 +104,41 @@ def compare_archives(
     right: dict[str, Any],
 ) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
+    data_issues: list[dict[str, str]] = []
+    report_issues: list[dict[str, str]] = []
     for side in (left, right):
         if side["report_present"] and side["reported_collector_id"] != side["collector_id"]:
-            issues.append(
-                _issue(
-                    "critical",
-                    f"collector_identity:{side['profile_id']}",
-                    f"配置 {side['collector_id']}，报告 {side['reported_collector_id'] or '--'}",
-                )
+            issue = _issue(
+                "critical",
+                f"collector_identity:{side['profile_id']}",
+                f"配置 {side['collector_id']}，报告 {side['reported_collector_id'] or '--'}",
             )
+            issues.append(issue)
+            data_issues.append(issue)
         status = side["overall_status"]
         if side["report_present"] and status != "healthy":
-            issues.append(
-                _issue(
-                    status if status in {"critical", "attention"} else "unknown",
-                    f"report_status:{side['profile_id']}",
-                    f"24 小时报告状态为 {status}",
-                )
+            issue = _issue(
+                status if status in {"critical", "attention"} else "unknown",
+                f"report_status:{side['profile_id']}",
+                f"24 小时报告状态为 {status}",
             )
+            issues.append(issue)
+            report_issues.append(issue)
     if (
         left["report_present"]
         and right["report_present"]
         and left["reported_collector_id"] == right["reported_collector_id"]
     ):
-        issues.append(_issue("critical", "collector_identity_duplicate", "两份报告使用相同节点标识"))
+        issue = _issue("critical", "collector_identity_duplicate", "两份报告使用相同节点标识")
+        issues.append(issue)
+        data_issues.append(issue)
 
     left_policy = left["quality_policy_sha256"]
     right_policy = right["quality_policy_sha256"]
     if left["report_present"] and right["report_present"] and left_policy != right_policy:
-        issues.append(_issue("attention", "quality_policy_mismatch", "两台服务器使用的质量策略不同"))
+        issue = _issue("attention", "quality_policy_mismatch", "两台服务器使用的质量策略不同")
+        issues.append(issue)
+        report_issues.append(issue)
 
     source_health = []
     compared_source_ids = (
@@ -157,24 +163,24 @@ def compare_archives(
             severity = "unknown"
         else:
             continue
-        issues.append(
-            _issue(
-                severity,
-                f"source_health:{source_id}",
-                f"{left_status} / {right_status}",
-            )
+        issue = _issue(
+            severity,
+            f"source_health:{source_id}",
+            f"{left_status} / {right_status}",
         )
+        issues.append(issue)
+        report_issues.append(issue)
 
     left_tables = set(left["business_inventory"])
     right_tables = set(right["business_inventory"])
     if left_tables != right_tables:
-        issues.append(
-            _issue(
-                "attention",
-                "business_inventory_mismatch",
-                "业务表清单不一致",
-            )
+        issue = _issue(
+            "attention",
+            "business_inventory_mismatch",
+            "业务表清单不一致",
         )
+        issues.append(issue)
+        data_issues.append(issue)
     left_records = int(left["record_count"])
     right_records = int(right["record_count"])
     denominator = max(left_records, right_records)
@@ -182,15 +188,20 @@ def compare_archives(
         abs(left_records - right_records) / denominator if denominator else 0.0
     )
     if relative_difference > 0.20:
-        issues.append(
-            _issue(
-                "attention",
-                "record_volume_difference",
-                f"总记录量相对差异 {relative_difference:.1%}，超过 20%",
-            )
+        issue = _issue(
+            "attention",
+            "record_volume_difference",
+            f"总记录量相对差异 {relative_difference:.1%}，超过 20%",
         )
+        issues.append(issue)
+        data_issues.append(issue)
     status = min(
         (item["severity"] for item in issues),
+        key=lambda value: STATUS_ORDER[value],
+        default="healthy",
+    )
+    data_status = min(
+        (item["severity"] for item in data_issues),
         key=lambda value: STATUS_ORDER[value],
         default="healthy",
     )
@@ -200,13 +211,21 @@ def compare_archives(
         "left_profile_id": left["profile_id"],
         "right_profile_id": right["profile_id"],
         "status": status,
+        "data_status": data_status,
+        "data_issues": data_issues,
+        "report_issues": report_issues,
         "restore_verification": {"left": "verified", "right": "verified"},
         "left_collector_id": left["collector_id"],
         "right_collector_id": right["collector_id"],
         "quality_policy": {"left": left_policy, "right": right_policy},
         "source_health": source_health,
         "record_count": {"left": left_records, "right": right_records},
+        "record_difference": abs(left_records - right_records),
         "record_relative_difference": round(relative_difference, 6),
+        "report_status": {
+            "left": left["overall_status"] if left["report_present"] else "missing",
+            "right": right["overall_status"] if right["report_present"] else "missing",
+        },
         "business_inventory": {
             "left": left["business_inventory"],
             "right": right["business_inventory"],

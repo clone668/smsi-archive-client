@@ -52,6 +52,48 @@ def test_verified_directory_downloads_and_publishes_atomically(tmp_path, archive
     assert day["report_summary"]["source_counts"] == {"healthy": 1}
 
 
+def test_scan_removes_state_for_day_missing_remotely_and_locally(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    database.upsert_day(
+        profile.profile_id,
+        "2026-08-08",
+        status="ready",
+        detail="可下载",
+    )
+    manager = ArchiveManager(config, database)
+
+    result = manager.scan_profile(profile, download=False)
+
+    assert result["stale_removed"] == 1
+    assert database.day(profile.profile_id, "2026-08-08") is None
+    assert database.day(profile.profile_id, fixture["archive_date"]) is not None
+
+
+def test_scan_preserves_state_when_local_partial_directory_exists(
+    tmp_path, archive_fixture
+) -> None:
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    database.upsert_day(
+        profile.profile_id,
+        "2026-08-08",
+        status="cancelled",
+        detail="下次可继续",
+    )
+    manager = ArchiveManager(config, database)
+    manager.staging_root(profile, "2026-08-08").mkdir(parents=True)
+
+    result = manager.scan_profile(profile, download=False)
+
+    assert result["stale_removed"] == 0
+    assert database.day(profile.profile_id, "2026-08-08")["status"] == "cancelled"
+
+
 def test_runtime_report_summary_ignores_report_that_no_longer_matches_manifest(
     tmp_path, archive_fixture
 ) -> None:

@@ -179,6 +179,76 @@ def test_two_server_comparison_flags_large_record_volume_difference(
     )
 
 
+def test_report_attention_is_separate_from_healthy_data_comparison() -> None:
+    common = {
+        "reported_collector_id": "",
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": True,
+        "overall_status": "attention",
+        "quality_policy_sha256": "2" * 64,
+        "source_health": {"source-a": "healthy"},
+        "business_inventory": {"price_data": 1_430_397},
+    }
+    comparison = compare_archives(
+        "2026-08-12",
+        {
+            **common,
+            "profile_id": "left",
+            "collector_id": "collector-a",
+            "reported_collector_id": "collector-a",
+            "record_count": 1_430_397,
+        },
+        {
+            **common,
+            "profile_id": "right",
+            "collector_id": "collector-b",
+            "reported_collector_id": "collector-b",
+            "record_count": 1_430_212,
+            "business_inventory": {"price_data": 1_430_212},
+        },
+    )
+
+    assert comparison["status"] == "attention"
+    assert comparison["data_status"] == "healthy"
+    assert comparison["data_issues"] == []
+    assert len(comparison["report_issues"]) == 2
+    assert all(
+        item["code"].startswith("report_status:")
+        for item in comparison["report_issues"]
+    )
+    assert comparison["record_difference"] == 185
+    assert comparison["record_relative_difference"] == 0.000129
+    assert comparison["report_status"] == {
+        "left": "attention",
+        "right": "attention",
+    }
+
+
+def test_scan_removes_comparison_for_deleted_archive_day(
+    tmp_path: Path,
+    archive_fixture,
+) -> None:
+    fixture = archive_fixture()
+    config = _two_profile_config(tmp_path, fixture)
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_all(download=True)
+    assert len(database.comparisons()) == 1
+
+    right_profile = config.profiles[1]
+    shutil.rmtree(
+        Path(right_profile.verified_source_root) / f"date={fixture['archive_date']}"
+    )
+    shutil.rmtree(manager.final_root(right_profile, fixture["archive_date"]))
+
+    results = manager.scan_all(download=False)
+
+    assert results[1]["stale_removed"] == 1
+    assert database.day(right_profile.profile_id, fixture["archive_date"]) is None
+    assert database.comparisons() == []
+
+
 def test_reportless_archives_compare_business_data_without_warning(
     tmp_path: Path,
     archive_fixture,

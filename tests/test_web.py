@@ -32,6 +32,9 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'id="remote-files-body"' in page
         assert 'id="remote-inspector"' in page
         assert 'id="transfer-dock"' in page
+        assert '<span>未完成</span>' in page
+        assert '<th>数据对比</th>' in page
+        assert '<th>运行报告</th>' in page
     finally:
         app.extensions["smsi_archive_service"].stop()
 

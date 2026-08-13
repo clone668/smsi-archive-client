@@ -424,6 +424,17 @@ class StateDatabase:
             ).fetchall()
         return [self._decode_day(row) for row in rows]
 
+    def delete_days(self, profile_id: str, archive_dates: set[str]) -> int:
+        dates = sorted({str(value)[:10] for value in archive_dates if value})
+        if not dates:
+            return 0
+        with self._lock, self._connect() as connection:
+            cursor = connection.executemany(
+                "DELETE FROM archive_days WHERE profile_id=? AND archive_date=?",
+                [(str(profile_id)[:64], archive_date) for archive_date in dates],
+            )
+            return int(cursor.rowcount)
+
     @staticmethod
     def _decode_day(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)

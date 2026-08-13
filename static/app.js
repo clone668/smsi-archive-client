@@ -113,8 +113,8 @@
     $("#metric-runtime-detail").textContent = runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
     $("#metric-verified").textContent = String(verified.length);
     $("#metric-latest").textContent = verified.length ? `最新 ${verified.map(item => item.archive_date).sort().at(-1)}` : "尚无本地归档";
-    $("#metric-pending").textContent = String(pending.length);
-    $("#metric-errors").textContent = bad.length ? `${bad.length} 项需要处理` : "没有失败项";
+    $("#metric-pending").textContent = String(pending.length + bad.length);
+    $("#metric-errors").textContent = `待同步 ${pending.length} · 失败 ${bad.length}`;
     const disk = runtime.disk || {};
     const ratio = disk.total ? Math.round(Number(disk.used) / Number(disk.total) * 100) : 0;
     $("#metric-disk").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
@@ -288,30 +288,58 @@
   function renderComparisons() {
     const body = $("#comparisons-body");
     const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
-    const status = {
-      healthy: ["一致", "good"], attention: ["需关注", "warn"],
-      critical: ["严重", "bad"], unknown: ["证据不足", ""],
+    const dataStatus = {
+      healthy: ["一致", "good"], attention: ["差异较大", "warn"],
+      critical: ["校验异常", "bad"], unknown: ["证据不足", ""],
+    };
+    const reportStatus = {
+      healthy: ["健康", "good"], attention: ["需关注", "warn"],
+      critical: ["严重", "bad"], unknown: ["未知", ""], missing: ["未生成", ""],
     };
     $("#comparison-summary").textContent = state.comparisons.length
       ? `${state.comparisons.length} 个日期对比结果；只使用已完成恢复验证的数据`
       : "仅比较两侧均已完成恢复验证的日期";
     if (!state.comparisons.length) {
-      body.innerHTML = '<tr><td colspan="6" class="empty-cell">两台服务器完成同一日期的下载与恢复验证后自动生成</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="empty-cell">两台服务器完成同一日期的下载与恢复验证后自动生成</td></tr>';
       return;
     }
     body.innerHTML = state.comparisons.map(item => {
-      const [label, tone] = status[item.status] || [item.status || "未知", ""];
       const left = profiles[item.left_profile_id] || item.left_profile_id;
       const right = profiles[item.right_profile_id] || item.right_profile_id;
       const records = item.record_count || {};
       const difference = Number(item.record_relative_difference || 0);
-      const issues = (item.issues || []).slice(0, 2).map(issue => issue.detail || issue.code).filter(Boolean);
-      const issueText = issues.length
-        ? issues.join("；")
-        : "质量策略、来源状态与业务表清单一致";
+      const dataIssues = item.data_issues || (item.issues || []).filter(issue =>
+        String(issue.code || "").startsWith("collector_identity") ||
+        ["business_inventory_mismatch", "record_volume_difference"].includes(issue.code)
+      );
+      const effectiveDataStatus = item.data_status || (dataIssues.length
+        ? dataIssues.map(issue => issue.severity).sort((a, b) => ["critical", "attention", "unknown", "healthy"].indexOf(a) - ["critical", "attention", "unknown", "healthy"].indexOf(b))[0]
+        : "healthy");
+      const absoluteDifference = Number(item.record_difference ?? Math.abs(Number(records.left || 0) - Number(records.right || 0)));
+      const [baseLabel, tone] = dataStatus[effectiveDataStatus] || [effectiveDataStatus || "未知", ""];
+      const label = effectiveDataStatus === "healthy" && absoluteDifference > 0 ? "基本一致" : baseLabel;
+      const percent = difference * 100;
+      const percentText = percent === 0 ? "0%" : percent < 0.1 ? `${percent.toFixed(3)}%` : percent < 1 ? `${percent.toFixed(2)}%` : `${percent.toFixed(1)}%`;
+      const issueText = dataIssues.map(issue => issue.detail || issue.code).filter(Boolean).join("；");
       const restore = item.restore_verification || {};
       const restorePassed = restore.left === "verified" && restore.right === "verified";
-      return `<tr><td>${escapeHtml(item.archive_date)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${escapeHtml(left)} / ${escapeHtml(right)}</td><td><span class="state-pill ${restorePassed ? "good" : ""}">${restorePassed ? "两侧通过" : "证据不足"}</span></td><td>${Number(records.left || 0).toLocaleString("zh-CN")} / ${Number(records.right || 0).toLocaleString("zh-CN")}</td><td title="${escapeHtml((item.issues || []).map(issue => issue.detail || issue.code).join("；"))}">${difference ? `差异 ${(difference * 100).toFixed(1)}% · ` : ""}${escapeHtml(issueText)}</td></tr>`;
+      const reports = item.report_status || {};
+      const legacyReports = Object.fromEntries((item.issues || []).filter(issue => String(issue.code || "").startsWith("report_status:")).map(issue => [String(issue.code).split(":")[1], String(issue.detail || "").split(" ").at(-1)]));
+      const leftReport = reports.left || legacyReports[item.left_profile_id] || "unknown";
+      const rightReport = reports.right || legacyReports[item.right_profile_id] || "unknown";
+      const leftReportView = reportStatus[leftReport] || [leftReport, ""];
+      const rightReportView = reportStatus[rightReport] || [rightReport, ""];
+      const sameReport = leftReport === rightReport;
+      const reportText = sameReport ? `两侧${leftReportView[0]}` : `${leftReportView[0]} / ${rightReportView[0]}`;
+      const reportTone = sameReport ? leftReportView[1] : (leftReport === "critical" || rightReport === "critical" ? "bad" : "warn");
+      const reportIssues = item.report_issues || (item.issues || []).filter(issue =>
+        String(issue.code || "").startsWith("report_status:") ||
+        String(issue.code || "").startsWith("source_health:") ||
+        issue.code === "quality_policy_mismatch"
+      );
+      const reportIssueText = reportIssues.map(issue => issue.detail || issue.code).filter(Boolean).join("；");
+      const comparisonText = `相差 ${absoluteDifference.toLocaleString("zh-CN")} 行 · ${percentText}${issueText ? ` · ${issueText}` : ""}`;
+      return `<tr><td>${escapeHtml(item.archive_date)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${escapeHtml(left)} / ${escapeHtml(right)}</td><td><span class="state-pill ${restorePassed ? "good" : ""}">${restorePassed ? "两侧通过" : "证据不足"}</span></td><td>${Number(records.left || 0).toLocaleString("zh-CN")} / ${Number(records.right || 0).toLocaleString("zh-CN")}</td><td title="${escapeHtml(reportIssueText)}"><span class="state-pill ${reportTone}">${escapeHtml(reportText)}</span></td><td title="${escapeHtml(issueText)}">${escapeHtml(comparisonText)}</td></tr>`;
     }).join("");
   }
 
