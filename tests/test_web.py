@@ -43,6 +43,7 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert '"归档状态检查"' in script
         assert '"状态检查中"' in script
         assert 'checking ? "停止检查" : "取消任务"' in script
+        assert 'const checking = runtime.running &&' in script
     finally:
         app.extensions["smsi_archive_service"].stop()
 

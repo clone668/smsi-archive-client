@@ -254,6 +254,44 @@ def test_archive_service_can_start_again_after_a_safe_stop(tmp_path) -> None:
         assert service.stop() is True
 
 
+def test_completed_scan_clears_live_progress(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    config = store.load()
+    config.auto_download = False
+    store.save(config)
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+    finished = threading.Event()
+
+    def execute(job_id, _action, _arguments):
+        service._update_progress(job_id, {
+            "phase": "scanning",
+            "profile_id": "collector-a",
+            "scan_dates_total": 1,
+            "scan_dates_done": 1,
+        })
+        return "已检查 1 个日期"
+
+    service._execute = execute
+    original_set_state = service._set_state
+
+    def set_state(**fields):
+        original_set_state(**fields)
+        if fields.get("running") is False and fields.get("progress") == {}:
+            finished.set()
+
+    service._set_state = set_state
+    service.request_scan(download=False)
+    service.start()
+    try:
+        assert finished.wait(timeout=2)
+        status = service.status()
+        assert status["running"] is False
+        assert status["progress"] == {}
+    finally:
+        assert service.stop() is True
+
+
 def test_safe_stop_queues_running_job_for_resume(tmp_path) -> None:
     store = ConfigStore(tmp_path / "state")
     store.load()

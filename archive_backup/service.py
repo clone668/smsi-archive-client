@@ -448,6 +448,7 @@ class ArchiveService:
                     self._set_state(
                         running=False,
                         action="idle",
+                        progress={},
                         last_finished_at=utc_now(),
                         next_scan_at=next_scan.isoformat().replace("+00:00", "Z"),
                     )

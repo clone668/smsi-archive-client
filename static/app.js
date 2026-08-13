@@ -106,7 +106,7 @@
   function renderMetrics() {
     const runtime = state.runtime || {};
     const currentJob = activeJob();
-    const checking = ["discovering", "scanning"].includes(runtime.progress?.phase);
+    const checking = runtime.running && ["discovering", "scanning"].includes(runtime.progress?.phase);
     const verified = state.days.filter(item => item.status === "verified");
     const bad = state.days.filter(item => ["error", "remote_failed", "manifest_changed"].includes(item.status));
     const pending = state.days.filter(item => !["verified", "error", "remote_failed", "manifest_changed"].includes(item.status));
