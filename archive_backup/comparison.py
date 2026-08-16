@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -12,6 +13,17 @@ from .verifier import local_object_path, verify_runtime_report
 
 
 STATUS_ORDER = {"critical": 0, "attention": 1, "unknown": 2, "healthy": 3}
+COMPARISON_CONTRACT = "smsi-archive-client-comparison/v2"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({str(item).strip() for item in value if str(item).strip()})
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -47,13 +59,24 @@ def _load_verified_archive(
     ):
         raise RuntimeError("本地恢复验证凭据与 manifest 不一致")
     inventory: dict[str, int] = {}
+    objects: dict[str, dict[str, Any]] = {}
     for item in snapshot.objects:
-        if item.get("kind") != "business":
-            continue
-        table_name = str(item.get("table_name") or "unknown")
-        inventory[table_name] = inventory.get(table_name, 0) + int(
-            item.get("row_count") or 0
-        )
+        relative_key = str(item.get("relative_key") or "")
+        kind = str(item.get("kind") or "")
+        table_name = str(item.get("table_name") or "")
+        objects[relative_key] = {
+            "kind": kind,
+            "table_name": table_name,
+            "row_count": int(item.get("row_count") or 0),
+            "size_bytes": int(item.get("size_bytes") or 0),
+            "sha256": str(item.get("sha256") or ""),
+            "content_sha256": str(item.get("content_sha256") or ""),
+            "schema_sha256": str(item.get("schema_sha256") or ""),
+        }
+        if kind == "business":
+            inventory[table_name or "unknown"] = inventory.get(
+                table_name or "unknown", 0
+            ) + int(item.get("row_count") or 0)
     report_items = [
         item for item in snapshot.objects if item.get("kind") == "runtime_report"
     ]
@@ -75,6 +98,9 @@ def _load_verified_archive(
         if isinstance(item, Mapping)
     }
     report_summary = runtime_report_summary(report) if report else {}
+    ledger_counts = snapshot.manifest.get("ledger_counts")
+    if not isinstance(ledger_counts, Mapping):
+        ledger_counts = {}
     return {
         "profile_id": profile.profile_id,
         "collector_id": profile.collector_id,
@@ -94,11 +120,30 @@ def _load_verified_archive(
         "source_health": source_health,
         "record_count": sum(inventory.values()),
         "business_inventory": dict(sorted(inventory.items())),
+        "collector_code_versions": _string_list(
+            ledger_counts.get("collector_code_versions")
+        ),
+        "source_epochs": _string_list(ledger_counts.get("source_epochs")),
+        "objects": objects,
     }
 
 
-def _issue(severity: str, code: str, detail: str) -> dict[str, str]:
-    return {"severity": severity, "code": code, "detail": detail}
+def _issue(
+    severity: str,
+    code: str,
+    detail: str,
+    **evidence: Any,
+) -> dict[str, Any]:
+    return {"severity": severity, "code": code, "detail": detail, **evidence}
+
+
+def _object_labels(keys: Sequence[str], objects: Mapping[str, Mapping[str, Any]]) -> str:
+    labels = [str(objects.get(key, {}).get("table_name") or key) for key in keys]
+    unique = list(dict.fromkeys(labels))
+    preview = "、".join(unique[:6])
+    if len(unique) > 6:
+        preview += f" 等 {len(unique)} 项"
+    return preview
 
 
 def compare_archives(
@@ -106,9 +151,9 @@ def compare_archives(
     left: dict[str, Any],
     right: dict[str, Any],
 ) -> dict[str, Any]:
-    issues: list[dict[str, str]] = []
-    data_issues: list[dict[str, str]] = []
-    report_issues: list[dict[str, str]] = []
+    issues: list[dict[str, Any]] = []
+    data_issues: list[dict[str, Any]] = []
+    report_issues: list[dict[str, Any]] = []
     for side in (left, right):
         if side["report_present"] and side["reported_collector_id"] != side["collector_id"]:
             issue = _issue(
@@ -151,6 +196,31 @@ def compare_archives(
         issue = _issue("attention", "quality_policy_mismatch", "两台服务器使用的质量策略不同")
         issues.append(issue)
         report_issues.append(issue)
+
+    for field, code, detail in (
+        (
+            "collector_code_versions",
+            "collector_code_version_mismatch",
+            "两台服务器的采集器代码版本集合不同",
+        ),
+        (
+            "source_epochs",
+            "source_epoch_mismatch",
+            "两台服务器的来源 Epoch 集合不同",
+        ),
+    ):
+        left_value = left.get(field) or []
+        right_value = right.get(field) or []
+        if left_value != right_value:
+            issue = _issue(
+                "attention",
+                code,
+                detail,
+                left=left_value,
+                right=right_value,
+            )
+            issues.append(issue)
+            data_issues.append(issue)
 
     source_health = []
     compared_source_ids = (
@@ -209,12 +279,90 @@ def compare_archives(
         )
         issues.append(issue)
         data_issues.append(issue)
+
+    left_objects = left.get("objects") or {}
+    right_objects = right.get("objects") or {}
+    left_keys = set(left_objects)
+    right_keys = set(right_objects)
+    left_only = sorted(left_keys - right_keys)
+    right_only = sorted(right_keys - left_keys)
+    if left_only or right_only:
+        issue = _issue(
+            "attention",
+            "object_set_mismatch",
+            f"归档对象集合不同：左侧独有 {len(left_only)}，右侧独有 {len(right_only)}",
+            left_only=left_only,
+            right_only=right_only,
+        )
+        issues.append(issue)
+        data_issues.append(issue)
+
+    metadata_keys: list[str] = []
+    schema_keys: list[str] = []
+    checksum_keys: list[str] = []
+    row_count_keys: list[str] = []
+    size_keys: list[str] = []
+    for key in sorted(left_keys & right_keys):
+        left_object = left_objects[key]
+        right_object = right_objects[key]
+        identity_specific = left_object.get("kind") == "runtime_report"
+        if (
+            left_object.get("kind"),
+            left_object.get("table_name"),
+        ) != (
+            right_object.get("kind"),
+            right_object.get("table_name"),
+        ):
+            metadata_keys.append(key)
+        if left_object.get("schema_sha256") != right_object.get("schema_sha256"):
+            schema_keys.append(key)
+        if identity_specific:
+            continue
+        if left_object.get("sha256") != right_object.get("sha256"):
+            checksum_keys.append(key)
+        if left_object.get("row_count") != right_object.get("row_count"):
+            row_count_keys.append(key)
+        if left_object.get("size_bytes") != right_object.get("size_bytes"):
+            size_keys.append(key)
+
+    if metadata_keys:
+        issue = _issue(
+            "attention",
+            "object_metadata_mismatch",
+            "对象类型或业务表标识不同："
+            + _object_labels(metadata_keys, left_objects),
+            objects=metadata_keys,
+        )
+        issues.append(issue)
+        data_issues.append(issue)
+    if schema_keys:
+        issue = _issue(
+            "attention",
+            "object_schema_mismatch",
+            "Schema 不一致：" + _object_labels(schema_keys, left_objects),
+            objects=schema_keys,
+        )
+        issues.append(issue)
+        data_issues.append(issue)
+
+    observed_differences: list[dict[str, Any]] = []
+    for code, keys in (
+        ("object_checksum_difference", checksum_keys),
+        ("object_row_count_difference", row_count_keys),
+        ("object_size_difference", size_keys),
+    ):
+        if keys:
+            observed_differences.append(
+                {"code": code, "count": len(keys), "objects": keys}
+            )
     data_status = min(
         (item["severity"] for item in data_issues),
         key=lambda value: STATUS_ORDER[value],
         default="healthy",
     )
     return {
+        "comparison_contract_version": COMPARISON_CONTRACT,
+        "evaluated_at": _utc_now(),
         "archive_date": archive_date,
         "pair_id": "__".join(sorted((left["profile_id"], right["profile_id"]))),
         "left_profile_id": left["profile_id"],
@@ -243,6 +391,20 @@ def compare_archives(
             "left": left["business_inventory"],
             "right": right["business_inventory"],
         },
+        "collector_code_versions": {
+            "left": left.get("collector_code_versions") or [],
+            "right": right.get("collector_code_versions") or [],
+        },
+        "source_epochs": {
+            "left": left.get("source_epochs") or [],
+            "right": right.get("source_epochs") or [],
+        },
+        "object_summary": {
+            "common": len(left_keys & right_keys),
+            "left_only": len(left_only),
+            "right_only": len(right_only),
+        },
+        "observed_differences": observed_differences,
         "issues": issues,
     }
 
@@ -250,6 +412,7 @@ def compare_archives(
 def build_archive_comparisons(
     config: ClientConfig,
     days: Sequence[Mapping[str, Any]],
+    previous: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     profiles = [profile for profile in config.profiles if profile.enabled]
     verified_dates = {
@@ -262,6 +425,14 @@ def build_archive_comparisons(
         for profile in profiles
     }
     results: list[dict[str, Any]] = []
+    day_rows = {
+        (str(item.get("profile_id") or ""), str(item.get("archive_date") or "")): item
+        for item in days
+    }
+    previous_results = {
+        (str(item.get("archive_date") or ""), str(item.get("pair_id") or "")): item
+        for item in previous
+    }
     for left_profile, right_profile in combinations(profiles, 2):
         dates = sorted(
             verified_dates[left_profile.profile_id]
@@ -269,6 +440,31 @@ def build_archive_comparisons(
             reverse=True,
         )
         for archive_date in dates:
+            pair_id = "__".join(
+                sorted((left_profile.profile_id, right_profile.profile_id))
+            )
+            left_day = day_rows[(left_profile.profile_id, archive_date)]
+            right_day = day_rows[(right_profile.profile_id, archive_date)]
+            inputs = {
+                "left_profile_id": left_profile.profile_id,
+                "right_profile_id": right_profile.profile_id,
+                "left_collector_id": left_profile.collector_id,
+                "right_collector_id": right_profile.collector_id,
+                "left_manifest_sha256": str(left_day.get("manifest_sha256") or ""),
+                "right_manifest_sha256": str(right_day.get("manifest_sha256") or ""),
+            }
+            previous_result = previous_results.get((archive_date, pair_id))
+            if (
+                previous_result
+                and previous_result.get("comparison_contract_version")
+                == COMPARISON_CONTRACT
+                and previous_result.get("status") != "unknown"
+                and previous_result.get("inputs") == inputs
+            ):
+                reused = dict(previous_result)
+                reused.pop("compared_at", None)
+                results.append(reused)
+                continue
             try:
                 left = _load_verified_archive(config, left_profile, archive_date)
                 right = _load_verified_archive(config, right_profile, archive_date)
@@ -276,9 +472,9 @@ def build_archive_comparisons(
             except RuntimeError as exc:
                 result = {
                     "archive_date": archive_date,
-                    "pair_id": "__".join(
-                        sorted((left_profile.profile_id, right_profile.profile_id))
-                    ),
+                    "comparison_contract_version": COMPARISON_CONTRACT,
+                    "evaluated_at": _utc_now(),
+                    "pair_id": pair_id,
                     "left_profile_id": left_profile.profile_id,
                     "right_profile_id": right_profile.profile_id,
                     "status": "unknown",
@@ -287,5 +483,6 @@ def build_archive_comparisons(
                         _issue("unknown", "comparison_evidence_unavailable", str(exc))
                     ],
                 }
+            result["inputs"] = inputs
             results.append(result)
     return results

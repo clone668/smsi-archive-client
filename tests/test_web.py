@@ -37,6 +37,7 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert '<span>未完成</span>' in page
         assert '<th>数据对比</th>' in page
         assert '<th>归档日数据质量</th>' in page
+        assert "归档中心 · v4.3.0" in page
         script = (
             Path(__file__).resolve().parents[1] / "static" / "app.js"
         ).read_text(encoding="utf-8")
@@ -45,6 +46,8 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert '"状态检查中"' in script
         assert 'checking ? "停止检查" : "取消任务"' in script
         assert 'const checking = runtime.running &&' in script
+        assert 'object_checksum_difference: "校验和"' in script
+        assert '? "正常差异" : baseLabel' in script
     finally:
         app.extensions["smsi_archive_service"].stop()
 

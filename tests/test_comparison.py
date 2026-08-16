@@ -6,9 +6,40 @@ import shutil
 from pathlib import Path
 
 from archive_backup.config import ClientConfig, ProfileConfig
+from archive_backup import comparison as comparison_module
 from archive_backup.database import StateDatabase
 from archive_backup.manager import ArchiveManager
 from archive_backup.comparison import compare_archives
+
+
+def _comparison_side(
+    profile_id: str,
+    collector_id: str,
+    object_item: dict,
+    *,
+    records: int = 100,
+    code_version: str = "a" * 40,
+    source_epoch: str = "source-v1",
+) -> dict:
+    return {
+        "profile_id": profile_id,
+        "collector_id": collector_id,
+        "reported_collector_id": "",
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": False,
+        "overall_status": "unknown",
+        "report_summary": {},
+        "quality_policy_sha256": "",
+        "source_health": {},
+        "record_count": records,
+        "business_inventory": {"price_data": records},
+        "collector_code_versions": [code_version],
+        "source_epochs": [source_epoch],
+        "objects": {
+            "date=2026-08-15/business/table=price_data/day/part-00000.parquet": object_item
+        },
+    }
 
 
 def _clone_source(
@@ -327,3 +358,142 @@ def test_reportless_archives_compare_business_data_without_warning(
     assert comparison["record_count"] == {"left": 2, "right": 2}
     assert comparison["source_health"] == []
     assert comparison["issues"] == []
+
+
+def test_schema_difference_requires_review() -> None:
+    common_object = {
+        "kind": "business",
+        "table_name": "price_data",
+        "row_count": 100,
+        "size_bytes": 200,
+        "sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+        "schema_sha256": "3" * 64,
+    }
+    left = _comparison_side("left", "collector-a", common_object)
+    right = _comparison_side(
+        "right",
+        "collector-b",
+        {**common_object, "schema_sha256": "4" * 64},
+    )
+
+    result = compare_archives("2026-08-15", left, right)
+
+    assert result["status"] == "attention"
+    assert result["comparison_contract_version"] == (
+        "smsi-archive-client-comparison/v2"
+    )
+    assert any(
+        issue["code"] == "object_schema_mismatch"
+        and "price_data" in issue["detail"]
+        for issue in result["data_issues"]
+    )
+
+
+def test_independent_capture_object_differences_are_observations() -> None:
+    left_object = {
+        "kind": "business",
+        "table_name": "price_data",
+        "row_count": 100,
+        "size_bytes": 200,
+        "sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+        "schema_sha256": "3" * 64,
+    }
+    right_object = {
+        **left_object,
+        "row_count": 99,
+        "size_bytes": 198,
+        "sha256": "4" * 64,
+        "content_sha256": "5" * 64,
+    }
+    left = _comparison_side("left", "collector-a", left_object)
+    right = _comparison_side(
+        "right", "collector-b", right_object, records=99
+    )
+
+    result = compare_archives("2026-08-15", left, right)
+
+    assert result["status"] == "healthy"
+    assert result["data_issues"] == []
+    assert {
+        observation["code"]: observation["count"]
+        for observation in result["observed_differences"]
+    } == {
+        "object_checksum_difference": 1,
+        "object_row_count_difference": 1,
+        "object_size_difference": 1,
+    }
+
+
+def test_collector_release_and_source_epoch_differences_require_review() -> None:
+    common_object = {
+        "kind": "business",
+        "table_name": "price_data",
+        "row_count": 100,
+        "size_bytes": 200,
+        "sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+        "schema_sha256": "3" * 64,
+    }
+    left = _comparison_side("left", "collector-a", common_object)
+    right = _comparison_side(
+        "right",
+        "collector-b",
+        common_object,
+        code_version="b" * 40,
+        source_epoch="source-v2",
+    )
+
+    result = compare_archives("2026-08-15", left, right)
+
+    assert result["status"] == "attention"
+    assert {issue["code"] for issue in result["data_issues"]} == {
+        "collector_code_version_mismatch",
+        "source_epoch_mismatch",
+    }
+
+
+def test_unchanged_manifest_pair_reuses_previous_comparison(
+    tmp_path: Path,
+    archive_fixture,
+    monkeypatch,
+) -> None:
+    fixture = archive_fixture()
+    config = _two_profile_config(tmp_path, fixture)
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    manager = ArchiveManager(config, database)
+    manager.scan_all(download=True)
+    first = database.comparisons()[0]
+    assert first["comparison_contract_version"] == (
+        "smsi-archive-client-comparison/v2"
+    )
+
+    original_loader = comparison_module._load_verified_archive
+
+    def unexpected_load(*_args, **_kwargs):
+        raise AssertionError("unchanged comparison must not reopen archive evidence")
+
+    monkeypatch.setattr(
+        comparison_module, "_load_verified_archive", unexpected_load
+    )
+    reused = manager.refresh_comparisons()[0]
+    assert reused["evaluated_at"] == first["evaluated_at"]
+
+    calls = []
+
+    def tracked_load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(comparison_module, "_load_verified_archive", tracked_load)
+    database.upsert_day(
+        "left",
+        fixture["archive_date"],
+        status="verified",
+        manifest_sha256="f" * 64,
+    )
+    refreshed = manager.refresh_comparisons()[0]
+
+    assert len(calls) == 2
+    assert refreshed["inputs"]["left_manifest_sha256"] == "f" * 64

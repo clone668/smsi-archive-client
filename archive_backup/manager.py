@@ -1682,7 +1682,11 @@ class ArchiveManager:
         return results
 
     def refresh_comparisons(self) -> list[dict[str, Any]]:
-        comparisons = build_archive_comparisons(self.config, self.database.days(5000))
+        comparisons = build_archive_comparisons(
+            self.config,
+            self.database.days(5000),
+            previous=self.database.comparisons(1000),
+        )
         self.database.replace_comparisons(comparisons)
         return comparisons
 

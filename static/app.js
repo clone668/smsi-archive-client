@@ -358,7 +358,17 @@
         : "healthy");
       const absoluteDifference = Number(item.record_difference ?? Math.abs(Number(records.left || 0) - Number(records.right || 0)));
       const [baseLabel, tone] = dataStatus[effectiveDataStatus] || [effectiveDataStatus || "未知", ""];
-      const label = effectiveDataStatus === "healthy" && absoluteDifference > 0 ? "基本一致" : baseLabel;
+      const observationLabels = {
+        object_checksum_difference: "校验和",
+        object_row_count_difference: "对象行数",
+        object_size_difference: "对象大小",
+      };
+      const observations = item.observed_differences || [];
+      const observationText = observations.map(observation =>
+        `${observationLabels[observation.code] || observation.code} ${Number(observation.count || 0)} 项`
+      ).join("、");
+      const label = effectiveDataStatus === "healthy" && (absoluteDifference > 0 || observations.length)
+        ? "正常差异" : baseLabel;
       const percent = difference * 100;
       const percentText = percent === 0 ? "0%" : percent < 0.1 ? `${percent.toFixed(3)}%` : percent < 1 ? `${percent.toFixed(2)}%` : `${percent.toFixed(1)}%`;
       const issueText = dataIssues.map(issue => issue.detail || issue.code).filter(Boolean).join("；");
@@ -384,8 +394,9 @@
         issue.code === "quality_policy_mismatch"
       );
       const reportIssueText = reportIssues.map(issue => issue.detail || issue.code).filter(Boolean).join("；");
-      const comparisonText = `相差 ${absoluteDifference.toLocaleString("zh-CN")} 行 · ${percentText}${issueText ? ` · ${issueText}` : ""}`;
-      return `<tr><td>${escapeHtml(item.archive_date)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${escapeHtml(left)} / ${escapeHtml(right)}</td><td><span class="state-pill ${restorePassed ? "good" : ""}">${restorePassed ? "两侧通过" : "证据不足"}</span></td><td>${Number(records.left || 0).toLocaleString("zh-CN")} / ${Number(records.right || 0).toLocaleString("zh-CN")}</td><td title="${escapeHtml(reportIssueText)}"><span class="state-pill ${reportTone}">${escapeHtml(reportText)}</span></td><td title="${escapeHtml(issueText)}">${escapeHtml(comparisonText)}</td></tr>`;
+      const comparisonText = `相差 ${absoluteDifference.toLocaleString("zh-CN")} 行 · ${percentText}${observationText ? ` · ${observationText}` : ""}${issueText ? ` · ${issueText}` : ""}`;
+      const comparisonTitle = [observationText, issueText].filter(Boolean).join("；");
+      return `<tr><td>${escapeHtml(item.archive_date)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${escapeHtml(left)} / ${escapeHtml(right)}</td><td><span class="state-pill ${restorePassed ? "good" : ""}">${restorePassed ? "两侧通过" : "证据不足"}</span></td><td>${Number(records.left || 0).toLocaleString("zh-CN")} / ${Number(records.right || 0).toLocaleString("zh-CN")}</td><td title="${escapeHtml(reportIssueText)}"><span class="state-pill ${reportTone}">${escapeHtml(reportText)}</span></td><td title="${escapeHtml(comparisonTitle)}">${escapeHtml(comparisonText)}</td></tr>`;
     }).join("");
   }
 
