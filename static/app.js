@@ -353,7 +353,7 @@
         String(issue.code || "").startsWith("collector_identity") ||
         ["business_inventory_mismatch", "record_volume_difference"].includes(issue.code)
       );
-      const effectiveDataStatus = item.data_status || (dataIssues.length
+      const effectiveDataStatus = item.data_status || item.status || (dataIssues.length
         ? dataIssues.map(issue => issue.severity).sort((a, b) => ["critical", "attention", "unknown", "healthy"].indexOf(a) - ["critical", "attention", "unknown", "healthy"].indexOf(b))[0]
         : "healthy");
       const absoluteDifference = Number(item.record_difference ?? Math.abs(Number(records.left || 0) - Number(records.right || 0)));

@@ -48,6 +48,7 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'const checking = runtime.running &&' in script
         assert 'object_checksum_difference: "校验和"' in script
         assert '? "正常差异" : baseLabel' in script
+        assert "item.data_status || item.status ||" in script
     finally:
         app.extensions["smsi_archive_service"].stop()
 
