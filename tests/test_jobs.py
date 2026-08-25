@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from archive_backup.config import ConfigStore
 from archive_backup.database import StateDatabase
@@ -290,6 +291,40 @@ def test_completed_scan_clears_live_progress(tmp_path) -> None:
         assert status["progress"] == {}
     finally:
         assert service.stop() is True
+
+
+def test_automatic_noop_scan_is_not_kept_as_task_history(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    config = store.load()
+    config.auto_download = False
+    store.save(config)
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+
+    service._execute = lambda *_args: ("发现 0 个日期，增量处理 0 个", False)
+    job = database.create_job("scan", requested_by="automatic")
+    service._pending = (int(job["id"]), "scan", {})
+    service.start()
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and database.job(int(job["id"])):
+            time.sleep(0.01)
+        assert database.job(int(job["id"])) is None
+    finally:
+        service.stop()
+
+
+def test_job_history_hides_legacy_automatic_noop_scans(tmp_path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    noop = database.create_job("scan_download", requested_by="automatic")
+    database.update_job(
+        noop["id"], status="completed", phase="completed", finished_at="now"
+    )
+    retained = database.create_job("download", requested_by="manual")
+    database.update_job(
+        retained["id"], status="completed", phase="completed", finished_at="now"
+    )
+    assert [item["id"] for item in database.jobs()] == [retained["id"]]
 
 
 def test_safe_stop_queues_running_job_for_resume(tmp_path) -> None:

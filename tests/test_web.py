@@ -34,10 +34,10 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'id="remote-files-body"' in page
         assert 'id="remote-inspector"' in page
         assert 'id="transfer-dock"' in page
-        assert '<span>未完成</span>' in page
+        assert '<span>需要处理</span>' in page
         assert '<th>数据对比</th>' in page
         assert '<th>归档日数据质量</th>' in page
-        assert "归档中心 · v4.3.0" in page
+        assert "归档中心 · v4.4.0" in page
         script = (
             Path(__file__).resolve().parents[1] / "static" / "app.js"
         ).read_text(encoding="utf-8")
@@ -47,7 +47,7 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'checking ? "停止检查" : "取消任务"' in script
         assert 'const checking = runtime.running &&' in script
         assert 'object_checksum_difference: "校验和"' in script
-        assert '? "正常差异" : baseLabel' in script
+        assert '? "轻微差异" : baseLabel' in script
         assert "item.data_status || item.status ||" in script
     finally:
         app.extensions["smsi_archive_service"].stop()
@@ -77,6 +77,38 @@ def test_login_and_csrf_protection(tmp_path) -> None:
         assert response.get_json()["job"]["status"] == "queued"
     finally:
         app.extensions["smsi_archive_service"].stop()
+
+
+def test_config_activation_does_not_scan_for_resource_only_changes(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    config = store.load()
+    config.auto_download = False
+    store.save(config)
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    calls = []
+    original_request_scan = service.request_scan
+    service.request_scan = lambda **kwargs: calls.append(kwargs) or {"id": 1}
+    try:
+        csrf = _login(client, store)
+        response = client.put(
+            "/api/config",
+            json={"download_workers": 3, "bandwidth_limit": "10M"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 200
+        assert response.get_json()["activation"] == {
+            "rescan_started": False,
+            "restart_required": False,
+            "next_task": True,
+            "changed_fields": ["bandwidth_limit", "download_workers"],
+        }
+        assert calls == []
+    finally:
+        service.request_scan = original_request_scan
+        service.stop()
 
 
 def test_day_detail_returns_remote_manifest_and_local_inventory(tmp_path, archive_fixture) -> None:

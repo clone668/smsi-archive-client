@@ -180,9 +180,33 @@ class StateDatabase:
         bounded = max(1, min(int(limit), 500))
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM archive_jobs ORDER BY id DESC LIMIT ?", (bounded,)
+                "SELECT * FROM archive_jobs "
+                "WHERE NOT (requested_by IN ('automatic','config') "
+                "AND action IN ('scan','scan_download') "
+                "AND status='completed' AND object_count=0 AND bytes_total=0 "
+                "AND error='') "
+                "ORDER BY id DESC LIMIT ?",
+                (bounded,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def delete_job(self, job_id: int) -> None:
+        """Remove a non-auditable no-op job and any transient item rows."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM archive_job_items WHERE job_id=?", (int(job_id),)
+            )
+            connection.execute(
+                "DELETE FROM archive_jobs WHERE id=?", (int(job_id),)
+            )
+
+    def profile_day_count(self, profile_id: str) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM archive_days WHERE profile_id=?",
+                (str(profile_id),),
+            ).fetchone()
+        return int(row["total"] if row else 0)
 
     def active_job(self) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:

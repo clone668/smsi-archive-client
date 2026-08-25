@@ -138,10 +138,10 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "config": current.public_dict(),
             "runtime": service.status(),
             "updates": updater.status(),
-            "days": database.days(1000),
-            "jobs": database.jobs(100),
-            "comparisons": database.comparisons(180),
-            "events": database.events(100),
+            "days": database.days(120),
+            "jobs": database.jobs(50),
+            "comparisons": database.comparisons(30),
+            "events": database.events(50),
             "initial_password_pending": config_store.initial_password_path.exists(),
         })
 
@@ -151,11 +151,25 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "ok": True,
             "runtime": service.status(),
             "updates": updater.status(),
-            "days": database.days(1000),
-            "jobs": database.jobs(100),
-            "comparisons": database.comparisons(180),
-            "events": database.events(100),
         })
+
+    @app.get("/api/archive-days")
+    def api_archive_days():
+        limit = request.args.get("limit", default=120, type=int) or 120
+        return jsonify({"ok": True, "days": database.days(limit)})
+
+    @app.get("/api/comparisons")
+    def api_comparisons():
+        limit = request.args.get("limit", default=30, type=int) or 30
+        return jsonify({
+            "ok": True,
+            "comparisons": database.comparisons(limit),
+        })
+
+    @app.get("/api/events")
+    def api_events():
+        limit = request.args.get("limit", default=50, type=int) or 50
+        return jsonify({"ok": True, "events": database.events(limit)})
 
     @app.get("/api/day-detail")
     def api_day_detail():
@@ -269,13 +283,73 @@ def create_app(store: ConfigStore | None = None) -> Flask:
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError("配置包含不支持的字段")
+        previous = config_store.load()
+        changed = {
+            key for key, value in payload.items()
+            if previous.public_dict().get(key) != value
+        }
+        if (
+            "local_root" in changed
+            and database.days(1)
+        ):
+            raise RuntimeError(
+                "本地归档目录已有状态记录，不能在普通设置中修改；请使用专用迁移流程"
+            )
+        if "profiles" in payload:
+            proposed = {
+                str(item.get("profile_id") or ""): item
+                for item in payload.get("profiles") or []
+                if isinstance(item, Mapping)
+            }
+            for profile in previous.profiles:
+                if not database.profile_day_count(profile.profile_id):
+                    continue
+                replacement = proposed.get(profile.profile_id)
+                if replacement is None:
+                    raise RuntimeError(
+                        f"{profile.display_name} 已有归档状态，不能删除或修改配置 ID"
+                    )
+                if str(replacement.get("collector_id") or "") != profile.collector_id:
+                    raise RuntimeError(
+                        f"{profile.display_name} 已有归档状态，不能修改 Collector ID"
+                    )
         current = config_store.update_public(payload)
-        try:
-            service.request_scan(download=current.auto_download)
-        except RuntimeError:
+        rescan_fields = {"local_root", "history_days", "profiles", "auto_download"}
+        restart_fields = {"web_host", "web_port"}
+        next_task_fields = {
+            "download_workers", "bandwidth_limit", "minimum_free_bytes",
+            "rclone_binary",
+        }
+        rescan_required = bool(changed & rescan_fields)
+        if rescan_required:
+            try:
+                service.request_scan(
+                    download=current.auto_download, requested_by="config"
+                )
+            except RuntimeError:
+                service.wake()
+        elif "poll_minutes" in changed:
             service.wake()
-        database.event("info", "客户端配置已更新")
-        return jsonify({"ok": True, "config": current.public_dict()})
+        activation = {
+            "rescan_started": rescan_required,
+            "restart_required": bool(changed & restart_fields),
+            "next_task": bool(changed & next_task_fields),
+            "changed_fields": sorted(changed),
+        }
+        database.event(
+            "info",
+            "客户端配置已更新",
+            detail=(
+                "Web 服务重启后生效"
+                if activation["restart_required"]
+                else "设置已生效"
+            ),
+        )
+        return jsonify({
+            "ok": True,
+            "config": current.public_dict(),
+            "activation": activation,
+        })
 
     @app.post("/api/actions/scan")
     def api_scan():

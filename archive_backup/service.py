@@ -119,8 +119,13 @@ class ArchiveService:
             self._condition.notify_all()
         return job
 
-    def request_scan(self, *, download: bool = True) -> dict[str, Any]:
-        return self._queue_job("scan_download" if download else "scan")
+    def request_scan(
+        self, *, download: bool = True, requested_by: str = "manual"
+    ) -> dict[str, Any]:
+        return self._queue_job(
+            "scan_download" if download else "scan",
+            requested_by=requested_by,
+        )
 
     def request_download(self, profile_id: str, archive_date: str) -> dict[str, Any]:
         return self._queue_job(
@@ -185,7 +190,9 @@ class ArchiveService:
         with self._condition:
             self._state.update(fields)
 
-    def _execute(self, job_id: int, action: str, arguments: dict[str, str]) -> str:
+    def _execute(
+        self, job_id: int, action: str, arguments: dict[str, str]
+    ) -> tuple[str, bool]:
         config = self.store.load()
         manager = ArchiveManager(
             config,
@@ -200,22 +207,29 @@ class ArchiveService:
             processed = sum(item.get("dates", 0) for item in results)
             skipped = sum(item.get("skipped_verified", 0) for item in results)
             audits = sum(item.get("manifest_audits", 0) for item in results)
+            completed = sum(item.get("completed", 0) for item in results)
+            failed = sum(item.get("failed", 0) for item in results)
+            material_results = any(bool(item.get("material")) for item in results)
+            completed_non_audits = max(0, completed - audits)
             detail = f"发现 {discovered} 个日期，增量处理 {processed} 个"
             if skipped:
                 detail += f"，跳过 {skipped} 个已验证日期"
             if audits:
                 detail += f"（含 {audits} 个清单巡检）"
-            return f"{detail}，清理 {removed} 条陈旧状态" if removed else detail
+            detail = f"{detail}，清理 {removed} 条陈旧状态" if removed else detail
+            return detail, bool(
+                material_results or completed_non_audits or failed or removed
+            )
         if action == "download":
             manager.download_specific(
                 arguments["profile_id"], arguments["archive_date"]
             )
-            return f"已下载并验证 {arguments['archive_date']}"
+            return f"已下载并验证 {arguments['archive_date']}", True
         if action == "verify":
             manager.verify_existing(
                 arguments["profile_id"], arguments["archive_date"]
             )
-            return f"已重新验证 {arguments['archive_date']}"
+            return f"已重新验证 {arguments['archive_date']}", True
         raise RuntimeError("未知后台任务")
 
     def _update_progress(self, job_id: int, progress: dict[str, Any]) -> None:
@@ -379,7 +393,12 @@ class ArchiveService:
                     self._wait_for_work(interval)
                     continue
                 try:
-                    detail = self._execute(job_id, action, arguments)
+                    outcome = self._execute(job_id, action, arguments)
+                    if isinstance(outcome, tuple):
+                        detail, material_result = outcome
+                    else:
+                        # Preserve compatibility with locally supplied executors.
+                        detail, material_result = outcome, True
                     self._set_state(detail=detail)
                     self.database.update_job(
                         job_id,
@@ -393,6 +412,13 @@ class ArchiveService:
                         finished_at=utc_now(),
                     )
                     self.database.finish_job_items(job_id, "completed")
+                    job = self.database.job(job_id) or {}
+                    if (
+                        job.get("requested_by") in {"automatic", "config"}
+                        and action in {"scan", "scan_download"}
+                        and not material_result
+                    ):
+                        self.database.delete_job(job_id)
                 except OperationCancelled as exc:
                     if self._stop.is_set():
                         detail = "客户端停止，任务将在下次启动时恢复"

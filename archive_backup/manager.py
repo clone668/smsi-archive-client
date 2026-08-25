@@ -1480,6 +1480,7 @@ class ArchiveManager:
         })
         completed = 0
         failed = 0
+        material = False
         for index, archive_date in enumerate(dates, start=1):
             raise_if_cancelled(self.cancel)
             try:
@@ -1493,6 +1494,14 @@ class ArchiveManager:
                     )
                 if report:
                     completed += 1
+                    if archive_date not in audit_dates or str(
+                        report.get("status") or ""
+                    ) != "manifest_unchanged":
+                        material = True
+                else:
+                    row = self.database.day(profile.profile_id, archive_date) or {}
+                    if str(row.get("status") or "") != "verified":
+                        material = True
             except OperationCancelled:
                 self._mark_cancelled_day(profile, archive_date)
                 raise
@@ -1527,6 +1536,7 @@ class ArchiveManager:
             "manifest_audits": len(audit_dates),
             "completed": completed,
             "failed": failed,
+            "material": material,
             "stale_removed": stale_removed,
         }
 
@@ -1636,6 +1646,7 @@ class ArchiveManager:
                         "manifest_audits": 0,
                         "completed": 0,
                         "failed": 1,
+                        "material": True,
                         "stale_removed": 0,
                     })
                     self.database.event(
@@ -1672,6 +1683,7 @@ class ArchiveManager:
                     "manifest_audits": len(audit_dates),
                     "completed": 0,
                     "failed": 1,
+                    "material": True,
                     "stale_removed": stale_removed,
                 })
                 self.database.event(

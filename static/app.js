@@ -2,7 +2,7 @@
   "use strict";
   const state = {
     csrf: "", config: null, runtime: null, updates: null, days: [], jobs: [], comparisons: [], events: [],
-    timer: null, updateTimer: null,
+    timer: null, updateTimer: null, currentPage: "overview", lastDataRefresh: 0,
     fileBrowsers: {
       remote: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
       local: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
@@ -95,27 +95,49 @@
   function switchPage(pageName) {
     if (pageName === "files") pageName = "remote-files";
     const navPage = ["remote-files", "local-files"].includes(pageName) ? "files" : pageName;
+    state.currentPage = pageName;
     $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === navPage));
     $$(".page").forEach(page => page.classList.toggle("active", page.id === `${pageName}-page`));
     if (pageName === "jobs") renderJobs();
     if (pageName === "remote-files") loadFileDates("remote");
     if (pageName === "local-files") loadFileDates("local");
-    if (pageName === "updates") pollUpdateStatus();
+    if (pageName === "settings") pollUpdateStatus();
+    renderTransferDock();
   }
 
   function renderMetrics() {
     const runtime = state.runtime || {};
     const currentJob = activeJob();
     const checking = runtime.running && ["discovering", "scanning"].includes(runtime.progress?.phase);
-    const verified = state.days.filter(item => item.status === "verified");
-    const bad = state.days.filter(item => ["error", "remote_failed", "manifest_changed"].includes(item.status));
-    const pending = state.days.filter(item => !["verified", "error", "remote_failed", "manifest_changed"].includes(item.status));
-    $("#metric-runtime").textContent = checking ? "检查中" : runtime.running ? "执行中" : currentJob ? "排队中" : (runtime.auto_download ? "自动运行" : "已暂停");
-    $("#metric-runtime-detail").textContent = checking ? "正在发现新归档与异常状态" : runtime.running || currentJob ? (currentJob?.detail || runtime.detail) : `下次检查 ${timeText(runtime.next_scan_at)}`;
-    $("#metric-verified").textContent = String(verified.length);
-    $("#metric-latest").textContent = verified.length ? `最新 ${verified.map(item => item.archive_date).sort().at(-1)}` : "尚无本地归档";
-    $("#metric-pending").textContent = String(pending.length + bad.length);
-    $("#metric-errors").textContent = `待同步 ${pending.length} · 失败 ${bad.length}`;
+    const profiles = (state.config?.profiles || []).filter(item => item.enabled !== false);
+    const verifiedByProfile = Object.fromEntries(profiles.map(profile => [
+      profile.profile_id,
+      state.days.filter(item => item.profile_id === profile.profile_id && item.status === "verified").map(item => item.archive_date),
+    ]));
+    const commonDates = profiles.length
+      ? [...new Set(verifiedByProfile[profiles[0].profile_id] || [])].filter(value => profiles.every(profile => (verifiedByProfile[profile.profile_id] || []).includes(value))).sort()
+      : [];
+    const latestByProfile = profiles.map(profile => ({
+      name: profile.display_name,
+      date: [...(verifiedByProfile[profile.profile_id] || [])].sort().at(-1) || "--",
+    }));
+    const actionableStatuses = new Set(["error", "remote_failed", "manifest_changed", "interrupted", "cancelled"]);
+    const actionableDays = state.days.filter(item => actionableStatuses.has(item.status));
+    const comparisonIssues = state.comparisons.filter(item => ["critical", "attention"].includes(item.data_status || item.status));
+    const taskLabel = checking ? "检查中" : runtime.running ? "执行中" : currentJob ? "排队中" : "空闲";
+    $("#runtime-client-state").textContent = runtime.disk_error ? "客户端降级" : "客户端在线";
+    $("#runtime-client-state").className = `status-dot ${runtime.disk_error ? "bad" : "good"}`;
+    $("#runtime-automation").textContent = `自动同步 ${runtime.auto_download ? "已开启" : "已暂停"}`;
+    $("#runtime-task").textContent = `当前任务 ${taskLabel}`;
+    $("#runtime-next-scan").textContent = `下次检查 ${timeText(runtime.next_scan_at)}`;
+    $("#metric-common-date").textContent = commonDates.at(-1) || "尚无";
+    $("#metric-common-detail").textContent = commonDates.length ? `${commonDates.length} 个共同完整日期` : "等待两侧完成同一归档日";
+    $("#metric-profile-dates").textContent = latestByProfile.every(item => item.date === latestByProfile[0]?.date) && latestByProfile.length
+      ? latestByProfile[0].date : "日期不同";
+    $("#metric-profile-detail").textContent = latestByProfile.map(item => `${item.name} ${item.date}`).join(" · ") || "尚未配置采集服务器";
+    $("#metric-actionable").textContent = String(actionableDays.length + comparisonIssues.length);
+    $("#metric-actionable-detail").textContent = actionableDays.length || comparisonIssues.length
+      ? `归档 ${actionableDays.length} · 对比 ${comparisonIssues.length}` : "当前没有需要处理的问题";
     const disk = runtime.disk || {};
     const ratio = disk.total ? Math.round(Number(disk.used) / Number(disk.total) * 100) : 0;
     $("#metric-disk").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
@@ -212,6 +234,7 @@
     renderTaskPanel("overview-job", active, progress);
     renderTaskPanel("jobs", active, progress);
     renderTransferDock(active, progress);
+    $("#overview-active-job").classList.toggle("hidden", !active);
     $("#jobs-count").textContent = String(state.jobs.length);
     const body = $("#jobs-body");
     if (!state.jobs.length) { body.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无任务</td></tr>'; return; }
@@ -234,6 +257,7 @@
       : job
       ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
       : ["空闲", ""];
+    $("#transfer-dock").classList.toggle("hidden", !active || state.currentPage === "jobs");
     $("#transfer-dock").classList.toggle("busy", active);
     $("#transfer-dock-title").textContent = values.scanning ? "正在检查归档状态" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "传输空闲";
     $("#transfer-dock-detail").textContent = job
@@ -304,7 +328,9 @@
     const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
     $("#day-summary").textContent = `${state.days.length} 条本地状态记录`;
     if (!state.days.length) { body.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无记录</td></tr>'; return; }
-    body.innerHTML = state.days.map(item => {
+    const recentDates = [...new Set(state.days.map(item => item.archive_date))].sort().reverse().slice(0, 7);
+    const visibleDays = state.days.filter(item => recentDates.includes(item.archive_date));
+    body.innerHTML = visibleDays.map(item => {
       const live = state.runtime?.progress;
       const liveMatches = live && live.profile_id === item.profile_id && live.archive_date === item.archive_date && ["downloading", "verifying"].includes(live.phase);
       const objectsDone = liveMatches ? Number(live.objects_done || 0) : Number(item.objects_done || 0);
@@ -334,7 +360,7 @@
     const body = $("#comparisons-body");
     const profiles = Object.fromEntries((state.config?.profiles || []).map(item => [item.profile_id, item.display_name]));
     const dataStatus = {
-      healthy: ["一致", "good"], attention: ["差异较大", "warn"],
+      healthy: ["一致", "good"], attention: ["需要复核", "warn"],
       critical: ["校验异常", "bad"], unknown: ["证据不足", ""],
     };
     $("#comparison-summary").textContent = state.comparisons.length
@@ -344,7 +370,7 @@
       body.innerHTML = '<tr><td colspan="7" class="empty-cell">两台服务器完成同一日期的下载与恢复验证后自动生成</td></tr>';
       return;
     }
-    body.innerHTML = state.comparisons.map(item => {
+    body.innerHTML = state.comparisons.slice(0, 7).map(item => {
       const left = profiles[item.left_profile_id] || item.left_profile_id;
       const right = profiles[item.right_profile_id] || item.right_profile_id;
       const records = item.record_count || {};
@@ -362,13 +388,14 @@
         object_checksum_difference: "校验和",
         object_row_count_difference: "对象行数",
         object_size_difference: "对象大小",
+        object_schema_compatible_difference: "兼容 Schema",
       };
       const observations = item.observed_differences || [];
       const observationText = observations.map(observation =>
         `${observationLabels[observation.code] || observation.code} ${Number(observation.count || 0)} 项`
       ).join("、");
       const label = effectiveDataStatus === "healthy" && (absoluteDifference > 0 || observations.length)
-        ? "正常差异" : baseLabel;
+        ? "轻微差异" : baseLabel;
       const percent = difference * 100;
       const percentText = percent === 0 ? "0%" : percent < 0.1 ? `${percent.toFixed(3)}%` : percent < 1 ? `${percent.toFixed(2)}%` : `${percent.toFixed(1)}%`;
       const issueText = dataIssues.map(issue => issue.detail || issue.code).filter(Boolean).join("；");
@@ -497,10 +524,9 @@
     $("#update-status").textContent = status;
     $("#update-state").textContent = label;
     $("#update-state").className = `state-pill ${tone}`.trim();
-    $("#nav-update-state").textContent = label;
     $("#check-update").disabled = active;
     $("#download-update").disabled = active || !updates.update_available || !!staged;
-    $("#restart-update").disabled = active || !updates.helper_available;
+    $("#restart-update").disabled = active || !updates.helper_available || !staged;
     const blockedReason = $("#update-blocked-reason");
     if (archiveBusy) {
       const progress = state.runtime?.progress || {};
@@ -1077,12 +1103,13 @@
 
   function profileTemplate(profile, index) {
     const sourceType = profile.source_type || "google_drive";
+    const locked = state.days.some(item => item.profile_id === profile.profile_id);
     return `<article class="profile-edit" data-index="${index}">
-      <div class="profile-edit-head"><strong>${escapeHtml(profile.display_name || "新采集服务器")}</strong><button type="button" class="button small danger remove-profile">删除</button></div>
+      <div class="profile-edit-head"><strong>${escapeHtml(profile.display_name || "新采集服务器")}</strong><div class="profile-lock-state">${locked ? '<span class="state-pill good">标识已锁定</span>' : ''}<button type="button" class="button small danger remove-profile" ${locked ? "disabled title=\"已有归档状态，不能删除\"" : ""}>删除</button></div></div>
       <div class="profile-fields">
-        <label>配置 ID<input data-field="profile_id" value="${escapeHtml(profile.profile_id)}" required></label>
+        <label>配置 ID<input data-field="profile_id" value="${escapeHtml(profile.profile_id)}" required ${locked ? "readonly" : ""}></label>
         <label>显示名称<input data-field="display_name" value="${escapeHtml(profile.display_name)}" required></label>
-        <label>Collector ID<input data-field="collector_id" value="${escapeHtml(profile.collector_id)}" required></label>
+        <label>Collector ID<input data-field="collector_id" value="${escapeHtml(profile.collector_id)}" required ${locked ? "readonly" : ""}></label>
         <label>来源<select data-field="source_type"><option value="google_drive" ${sourceType === "google_drive" ? "selected" : ""}>Google Drive</option><option value="verified_directory" ${sourceType === "verified_directory" ? "selected" : ""}>已验证目录</option></select></label>
         <label class="drive-field">rclone remote<input data-field="drive_remote" value="${escapeHtml(profile.drive_remote || "gdrive:")}"></label>
         <label class="drive-field wide-field">网盘前缀<input data-field="drive_prefix" value="${escapeHtml(profile.drive_prefix || "smsi/v3")}"></label>
@@ -1132,16 +1159,29 @@
     });
   }
 
-  async function saveSettings() {
+  function settingsPayload(section) {
+    const form = $("#settings-form");
+    if (section === "runtime") return {
+      local_root: form.elements.local_root.value.trim(),
+      rclone_binary: form.elements.rclone_binary.value.trim(),
+      poll_minutes: Number(form.elements.poll_minutes.value),
+      history_days: Number(form.elements.history_days.value),
+      download_workers: Number(form.elements.download_workers.value),
+      bandwidth_limit: form.elements.bandwidth_limit.value.trim(),
+      minimum_free_bytes: Number(form.elements.minimum_free_gib.value) * 1073741824,
+      auto_download: form.elements.auto_download.checked,
+    };
+    if (section === "profiles") return { profiles: collectProfiles() };
+    return {
+      web_host: form.elements.web_host.value.trim(),
+      web_port: Number(form.elements.web_port.value),
+    };
+  }
+
+  async function saveSettings(section) {
     const form = $("#settings-form");
     if (!form.reportValidity()) return;
-    const payload = {
-      local_root: form.elements.local_root.value.trim(), rclone_binary: form.elements.rclone_binary.value.trim(),
-      poll_minutes: Number(form.elements.poll_minutes.value), history_days: Number(form.elements.history_days.value),
-      download_workers: Number(form.elements.download_workers.value), bandwidth_limit: form.elements.bandwidth_limit.value.trim(),
-      minimum_free_bytes: Number(form.elements.minimum_free_gib.value) * 1073741824, auto_download: form.elements.auto_download.checked,
-      web_host: form.elements.web_host.value.trim(), web_port: Number(form.elements.web_port.value), profiles: collectProfiles(),
-    };
+    const payload = settingsPayload(section);
     try {
       const result = await api("/api/config", { method: "PUT", body: JSON.stringify(payload) });
       state.config = result.config;
@@ -1155,7 +1195,15 @@
         state.fileBrowsers[scope].index = null;
         state.fileBrowsers[scope].meta = null;
       }
-      toast("设置已保存");
+      const activation = result.activation || {};
+      const message = activation.restart_required
+        ? "设置已保存，重启客户端后生效"
+        : activation.rescan_started
+          ? "设置已保存，正在重新检查归档"
+          : activation.next_task
+            ? "设置已保存，从下个任务生效"
+            : "设置已保存并生效";
+      toast(message);
     }
     catch (error) { toast(error.message, true); }
   }
@@ -1181,13 +1229,41 @@
     catch (error) { toast(error.message, true); }
   }
 
-  async function refresh() {
+  async function refreshData() {
+    const [days, jobs, comparisons, events] = await Promise.all([
+      api("/api/archive-days?limit=120"),
+      api("/api/jobs"),
+      api("/api/comparisons?limit=30"),
+      api("/api/events?limit=50"),
+    ]);
+    state.days = days.days || [];
+    state.jobs = jobs.jobs || [];
+    state.comparisons = comparisons.comparisons || [];
+    state.events = events.events || [];
+    state.lastDataRefresh = Date.now();
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(state.timer);
+    if (document.hidden) return;
+    state.timer = setTimeout(() => refresh(), taskBusy() ? 2000 : 20000);
+  }
+
+  async function refresh(forceData = false) {
     try {
       const result = await api("/api/status");
-      state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events; renderAll(); renderUpdates();
+      const wasBusy = taskBusy();
+      state.runtime = result.runtime;
+      state.updates = result.updates;
+      if (forceData || wasBusy !== taskBusy() || Date.now() - state.lastDataRefresh >= 20000) {
+        await refreshData();
+      }
+      renderAll();
+      renderUpdates();
     } catch (error) {
       $("#connection-state").textContent = "连接中断"; $("#connection-state").className = "status-dot bad";
     }
+    scheduleRefresh();
   }
 
   async function bootstrap() {
@@ -1195,7 +1271,8 @@
     state.csrf = result.csrf; state.config = result.config; state.runtime = result.runtime; state.updates = result.updates; state.days = result.days; state.jobs = result.jobs || []; state.comparisons = result.comparisons || []; state.events = result.events;
     renderAll(); renderUpdates(); populateSettings(); renderFileProfileOptions();
     if (result.initial_password_pending) toast("当前仍在使用初始密码，请在设置中更改");
-    state.timer = setInterval(refresh, 5000);
+    state.lastDataRefresh = Date.now();
+    scheduleRefresh();
   }
 
   $$(".nav-item").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.page)));
@@ -1233,7 +1310,9 @@
   $("#check-update").addEventListener("click", checkUpdate);
   $("#download-update").addEventListener("click", downloadUpdate);
   $("#restart-update").addEventListener("click", restartUpdate);
-  $("#save-settings").addEventListener("click", saveSettings);
+  $("#save-runtime-settings").addEventListener("click", () => saveSettings("runtime"));
+  $("#save-profile-settings").addEventListener("click", () => saveSettings("profiles"));
+  $("#save-web-settings").addEventListener("click", () => saveSettings("web"));
   $("#add-profile").addEventListener("click", () => {
     const used = new Set(state.config.profiles.map(item => item.profile_id)); let counter = 1; while (used.has(`collector-${counter}`)) counter += 1;
     state.config.profiles.push({ profile_id: `collector-${counter}`, display_name: `采集服务器 ${counter}`, collector_id: `collector-${counter}`, enabled: true, source_type: "google_drive", drive_remote: "gdrive:", drive_prefix: "smsi/v3", verified_source_root: "" }); renderProfileEditor();
@@ -1243,6 +1322,12 @@
     try { await api("/api/password", { method: "PUT", body: JSON.stringify({ current_password: form.elements.current_password.value, new_password: form.elements.new_password.value }) }); form.reset(); toast("密码已更新"); }
     catch (error) { toast(error.message, true); }
   });
-  $("#logout").addEventListener("click", async () => { try { await api("/logout", { method: "POST", body: "{}" }); location.href = "/login"; } catch (error) { toast(error.message, true); } });
+  const logout = async () => { try { await api("/logout", { method: "POST", body: "{}" }); location.href = "/login"; } catch (error) { toast(error.message, true); } };
+  $("#logout").addEventListener("click", logout);
+  $("#logout-mobile").addEventListener("click", logout);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearTimeout(state.timer);
+    else refresh(true);
+  });
   bootstrap().catch(error => toast(error.message, true));
 })();

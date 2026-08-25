@@ -381,12 +381,53 @@ def test_schema_difference_requires_review() -> None:
 
     assert result["status"] == "attention"
     assert result["comparison_contract_version"] == (
-        "smsi-archive-client-comparison/v2"
+        "smsi-archive-client-comparison/v3"
     )
     assert any(
         issue["code"] == "object_schema_mismatch"
         and "price_data" in issue["detail"]
         for issue in result["data_issues"]
+    )
+
+
+def test_compatible_schema_difference_is_observation() -> None:
+    common_object = {
+        "kind": "business",
+        "table_name": "price_data",
+        "row_count": 100,
+        "size_bytes": 200,
+        "sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+        "schema_sha256": "3" * 64,
+        "schema_evidence": {
+            "fields": [
+                {"name": "timestamp", "type": "timestamp[us]", "nullable": False},
+                {"name": "symbol", "type": "string", "nullable": False},
+            ],
+            "null_counts": {"timestamp": 0, "symbol": 0},
+        },
+    }
+    left = _comparison_side("left", "collector-a", common_object)
+    right = _comparison_side(
+        "right",
+        "collector-b",
+        {
+            **common_object,
+            "schema_sha256": "4" * 64,
+            "schema_evidence": {
+                "fields": [
+                    {"name": "symbol", "type": "string", "nullable": False},
+                    {"name": "timestamp", "type": "timestamp[us]", "nullable": False},
+                ],
+                "null_counts": {"timestamp": 0, "symbol": 0},
+            },
+        },
+    )
+    result = compare_archives("2026-08-15", left, right)
+    assert result["status"] == "healthy"
+    assert result["data_issues"] == []
+    assert result["observed_differences"][0]["code"] == (
+        "object_schema_compatible_difference"
     )
 
 
@@ -466,7 +507,7 @@ def test_unchanged_manifest_pair_reuses_previous_comparison(
     manager.scan_all(download=True)
     first = database.comparisons()[0]
     assert first["comparison_contract_version"] == (
-        "smsi-archive-client-comparison/v2"
+        "smsi-archive-client-comparison/v3"
     )
 
     original_loader = comparison_module._load_verified_archive

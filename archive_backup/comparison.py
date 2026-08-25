@@ -6,6 +6,8 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import pyarrow.parquet as pq
+
 from .config import ClientConfig, ProfileConfig
 from .protocol import parse_manifest
 from .reporting import runtime_report_summary
@@ -13,7 +15,7 @@ from .verifier import local_object_path, verify_runtime_report
 
 
 STATUS_ORDER = {"critical": 0, "attention": 1, "unknown": 2, "healthy": 3}
-COMPARISON_CONTRACT = "smsi-archive-client-comparison/v2"
+COMPARISON_CONTRACT = "smsi-archive-client-comparison/v3"
 
 
 def _utc_now() -> str:
@@ -34,6 +36,31 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"验证证据格式无效: {path.name}")
     return value
+
+
+def _parquet_schema_evidence(path: Path) -> dict[str, Any]:
+    parquet = pq.ParquetFile(path)
+    fields = [
+        {
+            "name": field.name,
+            "type": str(field.type),
+            "nullable": bool(field.nullable),
+        }
+        for field in parquet.schema_arrow
+    ]
+    null_counts: dict[str, int | None] = {}
+    for column_index, field in enumerate(parquet.schema_arrow):
+        total: int | None = 0
+        for row_group_index in range(parquet.metadata.num_row_groups):
+            statistics = parquet.metadata.row_group(row_group_index).column(
+                column_index
+            ).statistics
+            if statistics is None or statistics.null_count is None:
+                total = None
+                break
+            total += int(statistics.null_count)
+        null_counts[field.name] = total
+    return {"fields": fields, "null_counts": null_counts}
 
 
 def _load_verified_archive(
@@ -64,7 +91,7 @@ def _load_verified_archive(
         relative_key = str(item.get("relative_key") or "")
         kind = str(item.get("kind") or "")
         table_name = str(item.get("table_name") or "")
-        objects[relative_key] = {
+        object_value = {
             "kind": kind,
             "table_name": table_name,
             "row_count": int(item.get("row_count") or 0),
@@ -73,6 +100,11 @@ def _load_verified_archive(
             "content_sha256": str(item.get("content_sha256") or ""),
             "schema_sha256": str(item.get("schema_sha256") or ""),
         }
+        if kind == "business":
+            object_value["schema_evidence"] = _parquet_schema_evidence(
+                local_object_path(root, relative_key, archive_date)
+            )
+        objects[relative_key] = object_value
         if kind == "business":
             inventory[table_name or "unknown"] = inventory.get(
                 table_name or "unknown", 0
@@ -144,6 +176,51 @@ def _object_labels(keys: Sequence[str], objects: Mapping[str, Mapping[str, Any]]
     if len(unique) > 6:
         preview += f" 等 {len(unique)} 项"
     return preview
+
+
+def _schema_difference(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> tuple[str, list[str]]:
+    left_evidence = left.get("schema_evidence") or {}
+    right_evidence = right.get("schema_evidence") or {}
+    left_fields = left_evidence.get("fields") or []
+    right_fields = right_evidence.get("fields") or []
+    if not left_fields or not right_fields:
+        return "incompatible", []
+    left_by_name = {str(item.get("name")): item for item in left_fields}
+    right_by_name = {str(item.get("name")): item for item in right_fields}
+    if set(left_by_name) != set(right_by_name):
+        return "incompatible", []
+    if any(
+        str(left_by_name[name].get("type"))
+        != str(right_by_name[name].get("type"))
+        for name in left_by_name
+    ):
+        return "incompatible", []
+    observations: list[str] = []
+    left_order = [str(item.get("name")) for item in left_fields]
+    right_order = [str(item.get("name")) for item in right_fields]
+    if left_order != right_order:
+        observations.append("column_order")
+    nullable_fields = [
+        name
+        for name in left_by_name
+        if bool(left_by_name[name].get("nullable"))
+        != bool(right_by_name[name].get("nullable"))
+    ]
+    if nullable_fields:
+        left_nulls = left_evidence.get("null_counts") or {}
+        right_nulls = right_evidence.get("null_counts") or {}
+        if all(
+            left_nulls.get(name) == 0 and right_nulls.get(name) == 0
+            for name in nullable_fields
+        ):
+            observations.append("nullable_without_nulls")
+        else:
+            return "incompatible", []
+    if observations:
+        return "compatible", observations
+    return "equivalent", ["fingerprint_only"]
 
 
 def compare_archives(
@@ -299,6 +376,7 @@ def compare_archives(
 
     metadata_keys: list[str] = []
     schema_keys: list[str] = []
+    schema_observations: dict[str, list[str]] = {}
     checksum_keys: list[str] = []
     row_count_keys: list[str] = []
     size_keys: list[str] = []
@@ -315,7 +393,13 @@ def compare_archives(
         ):
             metadata_keys.append(key)
         if left_object.get("schema_sha256") != right_object.get("schema_sha256"):
-            schema_keys.append(key)
+            classification, reasons = _schema_difference(
+                left_object, right_object
+            )
+            if classification == "incompatible":
+                schema_keys.append(key)
+            else:
+                schema_observations[key] = reasons
         if identity_specific:
             continue
         if left_object.get("sha256") != right_object.get("sha256"):
@@ -346,6 +430,13 @@ def compare_archives(
         data_issues.append(issue)
 
     observed_differences: list[dict[str, Any]] = []
+    if schema_observations:
+        observed_differences.append({
+            "code": "object_schema_compatible_difference",
+            "count": len(schema_observations),
+            "objects": sorted(schema_observations),
+            "reasons": schema_observations,
+        })
     for code, keys in (
         ("object_checksum_difference", checksum_keys),
         ("object_row_count_difference", row_count_keys),
