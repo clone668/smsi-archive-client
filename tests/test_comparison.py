@@ -295,6 +295,97 @@ def test_current_data_quality_remains_an_archive_comparison_alert() -> None:
     )
 
 
+def test_assessment_engine_skew_between_servers_is_reported() -> None:
+    """Two servers assessing health with different rule sets is deploy skew.
+
+    The engine label used to be a readability gate, which made an upgrade go
+    silent instead of loud.  It now has to raise its own issue.
+    """
+    common = {
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": True,
+        "overall_status": "healthy",
+        "quality_policy_sha256": "2" * 64,
+        "source_health": {"source-a": "healthy"},
+        "business_inventory": {"price_data": 100},
+        "record_count": 100,
+    }
+    comparison = compare_archives(
+        "2026-08-14",
+        {
+            **common,
+            "profile_id": "left",
+            "collector_id": "collector-a",
+            "reported_collector_id": "collector-a",
+            "report_summary": {
+                "assessment_classification": "current",
+                "assessment_engine_version": "smsi-runtime-health-assessment/v8",
+                "data_quality_status": "healthy",
+                "status": "healthy",
+            },
+        },
+        {
+            **common,
+            "profile_id": "right",
+            "collector_id": "collector-b",
+            "reported_collector_id": "collector-b",
+            "report_summary": {
+                "assessment_classification": "current",
+                "assessment_engine_version": "smsi-runtime-health-assessment/v7",
+                "data_quality_status": "healthy",
+                "status": "healthy",
+            },
+        },
+    )
+
+    issue = next(
+        item
+        for item in comparison["report_issues"]
+        if item["code"] == "assessment_engine_mismatch"
+    )
+    assert issue["severity"] == "attention"
+    assert issue["left"] == "smsi-runtime-health-assessment/v8"
+    assert issue["right"] == "smsi-runtime-health-assessment/v7"
+
+
+def test_matching_assessment_engines_raise_nothing() -> None:
+    common = {
+        "manifest_sha256": "1" * 64,
+        "report": {},
+        "report_present": True,
+        "overall_status": "healthy",
+        "quality_policy_sha256": "2" * 64,
+        "source_health": {"source-a": "healthy"},
+        "business_inventory": {"price_data": 100},
+        "record_count": 100,
+        "report_summary": {
+            "assessment_classification": "current",
+            "assessment_engine_version": "smsi-runtime-health-assessment/v8",
+            "data_quality_status": "healthy",
+            "status": "healthy",
+        },
+    }
+    comparison = compare_archives(
+        "2026-08-14",
+        {
+            **common,
+            "profile_id": "left",
+            "collector_id": "collector-a",
+            "reported_collector_id": "collector-a",
+        },
+        {
+            **common,
+            "profile_id": "right",
+            "collector_id": "collector-b",
+            "reported_collector_id": "collector-b",
+        },
+    )
+
+    assert comparison["report_issues"] == []
+    assert comparison["status"] == "healthy"
+
+
 def test_scan_removes_comparison_for_deleted_archive_day(
     tmp_path: Path,
     archive_fixture,

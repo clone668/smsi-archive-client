@@ -5,7 +5,6 @@ from typing import Any, Mapping
 
 
 OUTCOMES_CONTRACT = "smsi-runtime-health-outcomes/v1"
-ASSESSMENT_ENGINE_VERSION = "smsi-runtime-health-assessment/v4"
 HEALTH_STATUSES = frozenset({"healthy", "attention", "critical", "unknown"})
 
 
@@ -39,9 +38,13 @@ def runtime_report_summary(report: Mapping[str, Any]) -> dict[str, Any]:
     assessment = assessment if isinstance(assessment, Mapping) else {}
     outcomes = assessment.get("outcomes")
     outcomes = outcomes if isinstance(outcomes, Mapping) else {}
+    # Readability is decided by the outcomes *data* contract, never by the
+    # producer's engine label.  Gating on the engine version made every
+    # collector upgrade silently reclassify current reports as historical,
+    # which switched off the cross-server data-quality alarms in
+    # comparison.py.  The engine label stays as display metadata, and a
+    # mismatch between the two servers is raised as its own issue instead.
     outcomes_current = (
-        assessment.get("engine_version") == ASSESSMENT_ENGINE_VERSION
-        and
         outcomes.get("contract_version") == OUTCOMES_CONTRACT
         and isinstance(outcomes.get("data_quality"), Mapping)
         and isinstance(outcomes.get("operational"), Mapping)

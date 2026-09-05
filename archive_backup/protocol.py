@@ -13,14 +13,27 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MANIFEST_CONTRACT = "smsi-long-term-archive-manifest/v3"
 RUNTIME_REPORT_CONTRACT = "smsi-runtime-health-report/v1"
 PROGRESS_CONTRACT = "smsi-archive-progress/v1"
-PROGRESS_STAGES = {
-    "preparing",
-    "parquet_generation",
-    "remote_upload",
-    "manifest_publication",
-    "verified",
-    "failed",
+# The stage is a display-only label on a best-effort marker; nothing here
+# branches on it.  It is therefore validated by *shape*, not by an allowlist:
+# every time the collector published a new stage name the old allowlist turned
+# a healthy archive run into "归档处理失败" until the next poll.  Terminal
+# consistency (see parse_progress) is the invariant that actually has to hold.
+PROGRESS_STAGE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+PROGRESS_STAGE_LABELS = {
+    "preparing": "准备中",
+    "parquet_generation": "导出 Parquet",
+    "remote_upload": "上传远端",
+    "runtime_report_generation": "生成运行报告",
+    "runtime_report_upload": "上传运行报告",
+    "manifest_publication": "发布清单",
+    "verified": "已验证",
+    "failed": "失败",
 }
+
+
+def progress_stage_label(stage: str) -> str:
+    """Human label for a stage, falling back to the raw name when unknown."""
+    return PROGRESS_STAGE_LABELS.get(stage, stage)
 
 
 @dataclass(frozen=True)
@@ -83,7 +96,7 @@ def parse_progress(raw: bytes, archive_date: str) -> ProgressSnapshot:
         raise RuntimeError("归档进度日期不匹配")
     if status not in {"running", "verified", "failed"}:
         raise RuntimeError("归档进度状态无效")
-    if stage not in PROGRESS_STAGES:
+    if not PROGRESS_STAGE_RE.fullmatch(stage):
         raise RuntimeError("归档进度阶段无效")
     if (
         (status == "running" and stage in {"verified", "failed"})

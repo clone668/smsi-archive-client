@@ -4,20 +4,54 @@ import json
 
 import pytest
 
-from archive_backup.protocol import parse_manifest, parse_progress
+from archive_backup.protocol import parse_manifest, parse_progress, progress_stage_label
 from archive_backup.verifier import verify_runtime_report
 
 
-def test_running_progress_is_not_terminal() -> None:
-    raw = json.dumps({
+def _progress(stage: str, status: str = "running") -> bytes:
+    return json.dumps({
         "contract_version": "smsi-archive-progress/v1",
         "archive_date": "2026-08-07",
-        "status": "running",
-        "stage": "remote_upload",
+        "status": status,
+        "stage": stage,
     }).encode()
-    progress = parse_progress(raw, "2026-08-07")
+
+
+def test_running_progress_is_not_terminal() -> None:
+    progress = parse_progress(_progress("remote_upload"), "2026-08-07")
     assert progress.status == "running"
     assert progress.stage == "remote_upload"
+
+
+def test_progress_accepts_stages_the_collector_adds_later() -> None:
+    """The stage is a display label, so an unknown name is not a data fault.
+
+    The collector publishes runtime_report_generation and runtime_report_upload;
+    an allowlist that predates them logged a red "归档处理失败" for a healthy run.
+    """
+    for stage in (
+        "preparing",
+        "parquet_generation",
+        "remote_upload",
+        "runtime_report_generation",
+        "runtime_report_upload",
+        "manifest_publication",
+        "some_stage_invented_in_2027",
+    ):
+        assert parse_progress(_progress(stage), "2026-08-07").stage == stage
+
+    assert progress_stage_label("runtime_report_generation") == "生成运行报告"
+    assert progress_stage_label("some_stage_invented_in_2027") == "some_stage_invented_in_2027"
+
+
+def test_progress_still_refuses_garbage_and_inconsistent_terminals() -> None:
+    for stage in ("", "Remote Upload", "../etc", "x" * 65):
+        with pytest.raises(RuntimeError, match="阶段无效"):
+            parse_progress(_progress(stage), "2026-08-07")
+    with pytest.raises(RuntimeError, match="终态不一致"):
+        parse_progress(_progress("remote_upload", status="verified"), "2026-08-07")
+    with pytest.raises(RuntimeError, match="终态不一致"):
+        parse_progress(_progress("verified", status="running"), "2026-08-07")
 
 
 def test_manifest_rejects_incomplete_drive_readback(archive_fixture) -> None:

@@ -274,6 +274,22 @@ def compare_archives(
         issues.append(issue)
         report_issues.append(issue)
 
+    # The engine label is no longer a readability gate (see reporting.py), so
+    # spend it on the signal it actually carries: two servers assessing health
+    # with different rule sets are not comparable, which is deploy skew.
+    left_engine = str((left.get("report_summary") or {}).get("assessment_engine_version") or "")
+    right_engine = str((right.get("report_summary") or {}).get("assessment_engine_version") or "")
+    if left["report_present"] and right["report_present"] and left_engine != right_engine:
+        issue = _issue(
+            "attention",
+            "assessment_engine_mismatch",
+            f"两台服务器的健康评估引擎版本不同：{left_engine or '--'} / {right_engine or '--'}",
+            left=left_engine,
+            right=right_engine,
+        )
+        issues.append(issue)
+        report_issues.append(issue)
+
     for field, code, detail in (
         (
             "collector_code_versions",

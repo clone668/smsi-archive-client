@@ -118,15 +118,21 @@ def test_runtime_report_summary_exposes_current_data_quality_separately(
     assert summary["observation_count"] == 3
 
 
-def test_runtime_report_summary_requires_the_current_engine_version(
+def test_runtime_report_summary_reads_outcomes_from_a_newer_engine(
     tmp_path, archive_fixture
 ) -> None:
+    """A collector upgrade must not silently blank the data-quality verdicts.
+
+    The engine label is the producer's rule-set version and moves on its own
+    schedule (v4 -> v8 in production).  Readability is decided by the outcomes
+    data contract, so a newer engine stays fully readable.
+    """
     fixture = archive_fixture()
     config, _profile = make_config(tmp_path, fixture["source_root"])
     manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
     report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
     report["assessment"] = {
-        "engine_version": "smsi-runtime-health-assessment/v3",
+        "engine_version": "smsi-runtime-health-assessment/v8",
         "outcomes": {
             "contract_version": "smsi-runtime-health-outcomes/v1",
             "data_quality": {"status": "critical", "issue_count": 1},
@@ -147,8 +153,91 @@ def test_runtime_report_summary_requires_the_current_engine_version(
         fixture["day_root"], parse_manifest(manifest_raw, fixture["archive_date"])
     )
 
+    assert summary["assessment_classification"] == "current"
+    assert summary["data_quality_status"] == "critical"
+    assert summary["data_quality_issue_count"] == 1
+    assert summary["assessment_engine_version"] == "smsi-runtime-health-assessment/v8"
+
+
+def test_runtime_report_summary_requires_a_known_outcomes_contract(
+    tmp_path, archive_fixture
+) -> None:
+    """An unreadable outcomes *shape* is still refused."""
+    fixture = archive_fixture()
+    config, _profile = make_config(tmp_path, fixture["source_root"])
+    manager = ArchiveManager(config, StateDatabase(tmp_path / "state.sqlite3"))
+    report = json.loads(fixture["report_path"].read_text(encoding="utf-8"))
+    report["assessment"] = {
+        "engine_version": "smsi-runtime-health-assessment/v8",
+        "outcomes": {
+            "contract_version": "smsi-runtime-health-outcomes/v2",
+            "data_quality": {"status": "critical", "issue_count": 1},
+            "operational": {"status": "healthy", "issue_count": 0},
+        },
+    }
+    raw = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    fixture["report_path"].write_bytes(raw)
+    report_item = fixture["manifest"]["objects"][1]
+    report_item["size_bytes"] = len(raw)
+    report_item["sha256"] = hashlib.sha256(raw).hexdigest()
+    fixture["manifest"]["objects"][1] = report_item
+    manifest_raw = json.dumps(
+        fixture["manifest"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+    summary = manager._runtime_report_summary(
+        fixture["day_root"], parse_manifest(manifest_raw, fixture["archive_date"])
+    )
+
     assert summary["assessment_classification"] == "historical"
     assert summary["data_quality_status"] == ""
+
+
+def test_report_stage_in_progress_is_waiting_not_an_error(tmp_path, archive_fixture) -> None:
+    """A stage this client had never heard of must not look like a data fault.
+
+    The collector publishes runtime_report_generation / runtime_report_upload.
+    An allowlist that predates them made the whole day status="error" and wrote a
+    red "归档处理失败" event for a healthy archive run, once per stage per poll.
+    """
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    (fixture["day_root"] / "_smsi-archive-progress.json").write_text(
+        json.dumps({
+            "contract_version": "smsi-archive-progress/v1",
+            "archive_date": fixture["archive_date"],
+            "status": "running",
+            "stage": "runtime_report_upload",
+        }),
+        encoding="utf-8",
+    )
+
+    result = ArchiveManager(config, database).scan_profile(profile, download=True)
+
+    assert result["failed"] == 0
+    row = database.day("collector-a", fixture["archive_date"])
+    assert row["status"] == "remote_running"
+    assert row["detail"] == "上传运行报告"
+    assert [item for item in database.events(50) if item["level"] == "error"] == []
+
+
+def test_unreadable_progress_marker_falls_through_to_the_manifest(
+    tmp_path, archive_fixture
+) -> None:
+    """The marker is best-effort and can be read mid-write; only the manifest rules."""
+    fixture = archive_fixture()
+    config, profile = make_config(tmp_path, fixture["source_root"])
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    (fixture["day_root"] / "_smsi-archive-progress.json").write_text(
+        '{"contract_version": "smsi-archive-pro', encoding="utf-8"
+    )
+
+    result = ArchiveManager(config, database).scan_profile(profile, download=True)
+
+    assert result["failed"] == 0
+    assert database.day("collector-a", fixture["archive_date"])["status"] == "verified"
+    assert [item for item in database.events(50) if item["level"] == "error"] == []
 
 
 def test_scan_removes_state_for_day_missing_remotely_and_locally(

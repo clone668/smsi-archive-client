@@ -20,6 +20,7 @@ from .protocol import (
     ManifestSnapshot,
     parse_manifest,
     parse_progress,
+    progress_stage_label,
 )
 from .reporting import runtime_report_summary
 from .sources import ArchiveSource, build_source, split_bandwidth_limit
@@ -290,15 +291,27 @@ class ArchiveManager:
     ) -> tuple[ManifestSnapshot | None, str, str]:
         progress_key = f"date={archive_date}/_smsi-archive-progress.json"
         progress_raw = source.read_small(progress_key, 1024 * 1024)
+        progress_note = ""
         if progress_raw is not None:
-            progress = parse_progress(progress_raw, archive_date)
-            if progress.status == "running":
-                return None, "remote_running", progress.stage
-            if progress.status == "failed":
-                return None, "remote_failed", progress.error or progress.stage
+            # The marker is display-only and best-effort (it can be read
+            # mid-write).  It must never fail the day: an unreadable marker
+            # falls through to the manifest, which is the authority.
+            try:
+                progress = parse_progress(progress_raw, archive_date)
+            except RuntimeError as exc:
+                progress_note = f"归档进度标记无法解析（{exc}）"
+            else:
+                if progress.status == "running":
+                    return None, "remote_running", progress_stage_label(progress.stage)
+                if progress.status == "failed":
+                    return (
+                        None,
+                        "remote_failed",
+                        progress.error or progress_stage_label(progress.stage),
+                    )
         manifest_raw = source.read_small(f"date={archive_date}/manifest.json", 32 * 1024 * 1024)
         if manifest_raw is None:
-            return None, "waiting_manifest", "归档尚未发布 manifest"
+            return None, "waiting_manifest", progress_note or "归档尚未发布 manifest"
         snapshot = parse_manifest(manifest_raw, archive_date)
         return snapshot, "ready", "远端归档已验证"
 
