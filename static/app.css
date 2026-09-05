@@ -82,8 +82,12 @@ button { cursor: pointer; }
 .status-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .status-dot.good { color: var(--good); }
 .status-dot.bad { color: var(--bad); }
+/* An expected outage - a restart we asked for - is amber, not red: the dot has
+   to distinguish "we did this" from "something broke". */
+.status-dot.warn { color: var(--warn); }
 .sidebar .status-dot.good { color: #76cdb0; }
 .sidebar .status-dot.bad { color: #ff9299; }
+.sidebar .status-dot.warn { color: #f4c96f; }
 
 .app-shell { width: min(1560px, calc(100% - 40px)); margin: 0 auto; padding: 18px 0 64px; }
 .page { display: none; }
@@ -306,6 +310,11 @@ tbody tr:hover { background: var(--surface-2); }
 .update-step strong { font-size: 13px; }
 .update-step small { margin-top: 2px; color: var(--muted); font-size: 11px; }
 .update-step .button { grid-column: 2; justify-self: start; margin-top: 8px; }
+/* The maintenance restart is not step three of the update; it is a separate
+   operation that happens to live in the same panel, so it does not wear a
+   step number and sits on its own background. */
+.update-step.maintenance { background: var(--surface-2); }
+.update-step.maintenance .step-number { background: transparent; color: var(--muted); font-size: 16px; font-weight: 600; }
 .update-progress { padding: 16px 14px 14px; }
 .update-progress-head { margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .update-progress-head span { font-weight: 700; }

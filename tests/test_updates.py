@@ -124,3 +124,107 @@ def test_restart_activates_only_staged_revision(tmp_path, monkeypatch) -> None:
     manager.restart()
 
     assert requests == [{"action": "restart", "revision": staged}]
+
+
+def staged_manager(tmp_path, *, live: str | None, staged_requirements: str | None):
+    """A manager with one staged release, optionally with requirements files.
+
+    Both files are written as raw bytes: text mode on Windows would rewrite the
+    line endings, which is exactly what the CRLF case needs to control.
+    """
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    current = "a" * 40
+    staged = "b" * 40
+    (app_root / ".smsi-release").write_text(current, encoding="ascii")
+    if live is not None:
+        (app_root / "requirements.txt").write_bytes(live.encode("utf-8"))
+    manager = UpdateManager(
+        tmp_path / "state", app_root, helper_socket=str(tmp_path / "helper.sock")
+    )
+    manager.update_root.mkdir(parents=True)
+    manager.metadata_path.write_text('{"revision":"' + staged + '"}', encoding="utf-8")
+    (manager.update_root / staged).mkdir()
+    if staged_requirements is not None:
+        (manager.update_root / staged / "requirements.txt").write_bytes(
+            staged_requirements.encode("utf-8")
+        )
+    return manager, staged
+
+
+def test_status_reports_dependency_change_when_staged_requirements_differ(tmp_path) -> None:
+    manager, staged = staged_manager(
+        tmp_path, live="flask==3.0.3\n", staged_requirements="flask==3.0.3\npyarrow==17.0.0\n"
+    )
+
+    status = manager.status()
+
+    assert status["staged_revision"] == staged
+    assert status["dependency_change"] is True
+    assert status["install_command"] == "sudo bash deploy/install_ubuntu.sh"
+
+
+def test_status_ignores_line_ending_differences_in_requirements(tmp_path) -> None:
+    # The privileged helper compares with splitlines(), so a CRLF working copy
+    # must not look like a dependency change to the page either.
+    manager, _staged = staged_manager(
+        tmp_path, live="flask==3.0.3\nwaitress==3.0.0\n",
+        staged_requirements="flask==3.0.3\r\nwaitress==3.0.0\r\n",
+    )
+
+    assert manager.status()["dependency_change"] is False
+
+
+def test_status_reports_no_dependency_change_without_live_requirements(tmp_path) -> None:
+    # The helper skips its own comparison in this case, so nothing is refused.
+    manager, _staged = staged_manager(
+        tmp_path, live=None, staged_requirements="flask==3.0.3\n"
+    )
+
+    assert manager.status()["dependency_change"] is False
+
+
+def test_status_reports_no_dependency_change_without_staged_release(tmp_path) -> None:
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    (app_root / ".smsi-release").write_text("a" * 40, encoding="ascii")
+    (app_root / "requirements.txt").write_text("flask==3.0.3\n", encoding="utf-8")
+    manager = UpdateManager(
+        tmp_path / "state", app_root, helper_socket=str(tmp_path / "helper.sock")
+    )
+
+    status = manager.status()
+
+    assert status["staged_revision"] == ""
+    assert status["dependency_change"] is False
+
+
+def test_ensure_switchable_refuses_release_that_changes_dependencies(tmp_path) -> None:
+    manager, _staged = staged_manager(
+        tmp_path, live="flask==3.0.3\n", staged_requirements="flask==3.0.3\npyarrow==17.0.0\n"
+    )
+
+    with pytest.raises(RuntimeError, match="install_ubuntu.sh"):
+        manager.ensure_switchable()
+
+
+def test_ensure_switchable_allows_release_with_identical_dependencies(tmp_path) -> None:
+    manager, _staged = staged_manager(
+        tmp_path, live="flask==3.0.3\n", staged_requirements="flask==3.0.3\n"
+    )
+
+    manager.ensure_switchable()
+
+
+def test_maintenance_restart_never_activates_a_staged_release(tmp_path, monkeypatch) -> None:
+    manager, _staged = staged_manager(
+        tmp_path, live="flask==3.0.3\n", staged_requirements="flask==3.0.3\n"
+    )
+    requests = []
+    monkeypatch.setattr(
+        manager, "_helper_request", lambda payload: requests.append(payload) or {"ok": True}
+    )
+
+    manager.restart(activate=False)
+
+    assert requests == [{"action": "restart", "revision": ""}]

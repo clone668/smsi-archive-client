@@ -251,12 +251,20 @@ def create_app(store: ConfigStore | None = None) -> Flask:
 
     @app.post("/api/update/restart")
     def api_update_restart():
+        payload = request.get_json(silent=True) or {}
+        # A maintenance restart must not install a staged release as a side effect.
+        activate = payload.get("activate")
+        activate = True if activate is None else bool(activate)
+        if activate:
+            # Refuse before stopping anything: a task paused for an operation
+            # the helper will reject has lost a pass for nothing.
+            updater.ensure_switchable()
         archive_was_running = bool(service.status().get("running"))
         if not service.stop(timeout=30):
             service.resume_when_stopped()
             raise RuntimeError("当前任务未能在 30 秒内安全暂停，客户端没有重启")
         try:
-            result = updater.restart()
+            result = updater.restart(activate=activate)
         except Exception:
             # The process stays alive when the privileged helper rejects the
             # request, so resume archive work instead of leaving it stopped.

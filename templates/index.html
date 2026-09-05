@@ -248,7 +248,7 @@
         </section>
 
         <section class="content-band update-workflow settings-section">
-          <div class="section-heading"><div><h2>客户端更新</h2><p>下载并校验更新包，确认后再安全重启</p></div><span id="update-state" class="state-pill">未检查</span></div>
+          <div class="section-heading"><div><h2>客户端更新</h2><p>一次点击完成下载、校验、切换并自动刷新</p></div><span id="update-state" class="state-pill">未检查</span></div>
           <div class="update-version-grid embedded">
             <article class="metric compact"><span>当前版本</span><strong id="update-current">--</strong><small>正在运行</small></article>
             <article class="metric compact"><span>最新版本</span><strong id="update-latest">--</strong><small id="update-release-note">尚未检查</small></article>
@@ -257,8 +257,8 @@
           <div id="update-blocked-reason" class="workflow-notice hidden" role="status" aria-live="polite"></div>
           <div class="update-actions" aria-label="客户端更新操作">
             <div class="update-step"><span class="step-number">1</span><div><strong>检查版本</strong><small>只读取 GitHub 版本信息</small></div><button id="check-update" class="button secondary">检查更新</button></div>
-            <div class="update-step"><span class="step-number">2</span><div><strong>下载并校验</strong><small>不会替换正在运行的代码</small></div><button id="download-update" class="button primary" disabled>下载更新</button></div>
-            <div class="update-step"><span class="step-number">3</span><div><strong>重启客户端</strong><small id="restart-hint">更新准备完成后可用</small></div><button id="restart-update" class="button secondary" disabled>重启客户端</button></div>
+            <div class="update-step"><span class="step-number">2</span><div><strong>更新版本</strong><small id="install-hint">下载校验后自动切换并刷新页面</small></div><button id="install-update" class="button primary" disabled>更新版本</button></div>
+            <div class="update-step maintenance"><span class="step-number" aria-hidden="true">↻</span><div><strong>维护重启</strong><small id="restart-hint">只重启当前版本，不切换</small></div><button id="restart-update" class="button secondary">重启客户端</button></div>
           </div>
           <div id="update-progress" class="update-progress" aria-live="polite">
             <div class="update-progress-head"><span id="update-phase">等待操作</span><strong id="update-percent">--</strong></div>

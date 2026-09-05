@@ -3,6 +3,7 @@
   const state = {
     csrf: "", config: null, runtime: null, updates: null, days: [], jobs: [], comparisons: [], events: [],
     timer: null, updateTimer: null, currentPage: "overview", lastDataRefresh: 0,
+    updateFailure: "", updateNotice: "", updateBusy: false,
     fileBrowsers: {
       remote: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
       local: { request: 0, loadedProfile: "", path: "", date: "", dates: [], index: null, meta: null, currentResult: null, query: "" },
@@ -74,7 +75,17 @@
     const headers = { ...(options.headers || {}) };
     if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
     if (options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrf;
-    const response = await fetch(path, { credentials: "same-origin", ...options, headers });
+    let response;
+    try {
+      response = await fetch(path, { credentials: "same-origin", ...options, headers });
+    } catch {
+      // A server that answers is a server that refused; only a dropped
+      // connection means the service itself went away.  The update flow needs
+      // that difference to tell "restarting" from "rejected".
+      const offline = new Error("与客户端的连接中断");
+      offline.offline = true;
+      throw offline;
+    }
     let payload;
     try { payload = await response.json(); } catch { payload = { error: `请求失败 (${response.status})` }; }
     if (response.status === 401) { location.href = "/login"; throw new Error("登录已失效"); }
@@ -492,11 +503,21 @@
     const staged = String(updates.staged_revision || "").slice(0, 12);
     const phase = String(operation.phase || "idle");
     const active = !!operation.active;
+    // A restart is progress the server cannot report - during it, the server is
+    // not there to be asked.  updateBusy is what keeps the panel and the buttons
+    // honest across that gap, instead of falling back to the stale "已准备".
+    const busy = active || !!state.updateBusy;
     const archiveBusy = !!state.runtime?.running;
+    const dependencyChange = !!updates.dependency_change;
+    const installCommand = String(updates.install_command || "sudo bash deploy/install_ubuntu.sh");
     let label = "未检查";
     let tone = "";
     let status = `当前版本 ${current}，尚未检查远端版本。`;
-    if (active) {
+    if (state.updateBusy) {
+      label = "正在重启";
+      tone = "warn";
+      status = String(state.updateNotice || "客户端正在重启，恢复后会自动刷新页面。");
+    } else if (active) {
       label = updatePhaseMap[phase] || "更新进行中";
       tone = "warn";
       status = String(operation.detail || label);
@@ -504,10 +525,14 @@
       label = "更新失败";
       tone = "bad";
       status = String(operation.error || operation.detail || "更新操作失败");
+    } else if (dependencyChange) {
+      label = "需服务器安装";
+      tone = "warn";
+      status = `版本 ${staged} 改动了 Python 依赖，界面不能安装；请在服务器上执行 ${installCommand}`;
     } else if (staged) {
-      label = "待重启";
+      label = "待切换";
       tone = "good";
-      status = archiveBusy ? `版本 ${staged} 已准备；重启时会安全暂停当前任务，启动后继续。` : `版本 ${staged} 已准备，可以重启客户端。`;
+      status = archiveBusy ? `版本 ${staged} 已下载；切换时会安全暂停当前任务，启动后继续。` : `版本 ${staged} 已下载校验，再点“更新版本”即可切换。`;
     } else if (remote && updates.update_available) {
       label = "有新版本";
       tone = "warn";
@@ -525,52 +550,87 @@
     $("#update-status").textContent = status;
     $("#update-state").textContent = label;
     $("#update-state").className = `state-pill ${tone}`.trim();
-    $("#check-update").disabled = active;
-    $("#download-update").disabled = active || !updates.update_available || !!staged;
-    $("#restart-update").disabled = active || !updates.helper_available || !staged;
+    $("#check-update").disabled = busy;
+    // 更新版本 covers download, switch and restart, so it needs the helper and
+    // is available whenever there is either a new version or a staged one.
+    $("#install-update").disabled = busy
+      || dependencyChange
+      || !updates.helper_available
+      || !(updates.update_available || staged);
+    $("#restart-update").disabled = busy || !updates.helper_available;
     const blockedReason = $("#update-blocked-reason");
-    if (archiveBusy) {
+    $("#install-update").title = "下载、校验、切换并重启客户端";
+    $("#restart-update").title = "重启当前运行版本，不会切换版本";
+    if (busy) {
+      blockedReason.textContent = state.updateBusy
+        ? String(state.updateNotice || "客户端正在重启，请勿关闭页面")
+        : String(operation.detail || "更新操作正在进行");
+      blockedReason.className = "workflow-notice warn";
+    } else if (!updates.helper_available) {
+      blockedReason.textContent = "更新助手不可用，暂时不能切换版本，也不能从这里重启。";
+      blockedReason.className = "workflow-notice bad";
+      $("#install-update").title = "更新助手不可用";
+      $("#restart-update").title = "更新助手不可用";
+    } else if (dependencyChange) {
+      blockedReason.textContent = `这一版改动了 Python 依赖。更新助手只替换代码、不安装依赖，所以界面装不了这一版，需要在服务器上执行：${installCommand}`;
+      blockedReason.className = "workflow-notice warn";
+      $("#install-update").title = "这一版需要在服务器上安装";
+    } else if (archiveBusy) {
       const progress = state.runtime?.progress || {};
       const archivePhase = archivePhaseMap[progress.phase] || "归档任务正在运行";
       const objects = progress.object_count ? ` · ${Number(progress.objects_done || 0)}/${Number(progress.object_count)} 个对象` : "";
-      blockedReason.textContent = `${archivePhase}${objects}；重启会安全暂停当前任务，已完成对象和临时文件会保留，启动后继续。`;
+      blockedReason.textContent = `${archivePhase}${objects}；更新或重启会安全暂停当前任务，已完成对象和临时文件会保留，启动后继续。`;
       blockedReason.className = "workflow-notice warn";
-      $("#restart-update").title = "安全暂停当前任务并重启客户端";
-    } else if (staged && !active && updates.helper_available) {
-      blockedReason.textContent = "更新包已下载并校验，可以重启客户端。";
+      $("#install-update").title = "安全暂停当前任务，切换版本并重启";
+      $("#restart-update").title = "安全暂停当前任务并重启当前版本";
+    } else if (staged) {
+      blockedReason.textContent = "更新包已下载并校验，点“更新版本”完成切换和刷新。";
       blockedReason.className = "workflow-notice good";
-      $("#restart-update").title = "切换已校验的更新包并重启客户端";
-    } else if (!updates.helper_available) {
-      blockedReason.textContent = "更新助手不可用，暂时不能切换版本。";
-      blockedReason.className = "workflow-notice bad";
-      $("#restart-update").title = "更新助手不可用";
+      $("#install-update").title = "切换已校验的更新包并重启";
     } else {
-      blockedReason.textContent = "客户端当前空闲，可以按需重启当前版本。";
+      blockedReason.textContent = "客户端当前空闲。“更新版本”会一次完成下载、校验、切换和刷新。";
       blockedReason.className = "workflow-notice";
-      $("#restart-update").title = "重启当前运行版本";
     }
-    $("#restart-hint").textContent = !updates.helper_available
-      ? "Ubuntu 更新助手不可用"
-      : archiveBusy
-        ? "可重启，当前任务随后恢复"
-        : staged ? "更新已准备，可以安全切换" : "空闲时可按需重启";
+    $("#install-hint").textContent = !updates.helper_available
+      ? "更新助手不可用"
+      : dependencyChange
+        ? "这一版需在服务器上安装"
+        : staged ? "已下载，点一次完成切换" : "下载校验后自动切换并刷新页面";
+    $("#restart-hint").textContent = updates.helper_available
+      ? "只重启当前版本，不切换"
+      : "Ubuntu 更新助手不可用";
 
     const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
     const track = $("#update-progress-track");
-    const indeterminate = active && percent === null;
+    // While the client restarts there is no percentage to show and the last one
+    // (100% of a finished download) would read as "done", so the bar sweeps.
+    const indeterminate = state.updateBusy || (active && percent === null);
     track.classList.toggle("indeterminate", indeterminate);
     $("#update-progress-bar").style.width = `${percent ?? (staged ? 100 : 0)}%`;
     track.setAttribute("aria-valuenow", percent == null ? "0" : String(percent));
     track.setAttribute("aria-valuetext", indeterminate ? label : `${percent ?? (staged ? 100 : 0)}%`);
-    $("#update-phase").textContent = updatePhaseMap[phase] || label;
-    $("#update-percent").textContent = percent == null ? (active ? "处理中" : staged ? "100%" : "--") : `${percent.toFixed(percent % 1 ? 1 : 0)}%`;
+    $("#update-phase").textContent = state.updateBusy ? label : (updatePhaseMap[phase] || label);
+    $("#update-percent").textContent = state.updateBusy
+      ? "重启中"
+      : percent == null ? (active ? "处理中" : staged ? "100%" : "--") : `${percent.toFixed(percent % 1 ? 1 : 0)}%`;
     const done = Number(operation.bytes_done || 0);
     const total = Number(operation.bytes_total || 0);
     $("#update-bytes").textContent = total ? `${bytes(done)} / ${bytes(total)}` : done ? `已处理 ${bytes(done)}` : "数据量 --";
     $("#update-speed").textContent = Number(operation.speed_bytes_per_second || 0) > 0 ? `${bytes(operation.speed_bytes_per_second)}/秒` : "速度 --";
     $("#update-eta").textContent = operation.eta_seconds != null ? `剩余约 ${durationText(operation.eta_seconds)}` : "剩余时间 --";
-    $("#update-detail").textContent = operation.error || operation.detail || (staged ? "更新包已完成下载和校验，等待手动重启。" : "尚未开始更新操作。");
-    $("#update-detail").className = `update-detail${phase === "failed" ? " error" : ""}`;
+    // A refusal has to outlive the next poll: the operation record still says
+    // "ready", and a toast is gone by the time the user looks up.  This line is
+    // where the reason stays until the next attempt clears it.  The notice is
+    // the same idea for progress the server cannot report - during a restart
+    // the server is not there to be asked.
+    const failure = String(state.updateFailure || "");
+    const notice = String(state.updateNotice || "");
+    $("#update-detail").textContent = failure
+      || notice
+      || operation.error
+      || operation.detail
+      || (staged ? "更新包已下载校验，等待切换。" : "尚未开始更新操作。");
+    $("#update-detail").className = `update-detail${failure || phase === "failed" ? " error" : ""}`;
   }
 
   async function pollUpdateStatus() {
@@ -595,7 +655,16 @@
     state.updateTimer = null;
   }
 
+  function failUpdate(message) {
+    state.updateNotice = "";
+    state.updateFailure = String(message || "更新操作失败");
+    toast(state.updateFailure, true);
+    renderUpdates();
+  }
+
   async function checkUpdate() {
+    state.updateFailure = "";
+    state.updateNotice = "";
     state.updates.operation = { active: true, phase: "checking", detail: "正在检查 GitHub 最新版本" };
     renderUpdates();
     startUpdatePolling();
@@ -604,54 +673,77 @@
       state.updates = result.updates;
       renderUpdates();
       toast(result.updates.update_available ? "发现新版本" : "当前已是最新版本");
-    } catch (error) { toast(error.message, true); }
+    } catch (error) { failUpdate(error.message); }
     finally { stopUpdatePolling(); await pollUpdateStatus(); }
   }
 
-  async function downloadUpdate() {
-    const revision = state.updates?.latest?.revision;
+  async function installUpdate() {
+    const revision = state.updates?.staged_revision || state.updates?.latest?.revision;
     if (!revision) return toast("请先检查更新", true);
+    state.updateFailure = "";
+    state.updateNotice = "";
     state.updates.operation = { active: true, phase: "checking", detail: "正在确认目标版本" };
     renderUpdates();
     startUpdatePolling();
+    let downloaded = false;
     try {
       const result = await api("/api/update/download", { method: "POST", body: JSON.stringify({ revision }) });
       state.updates = result.updates;
-      renderUpdates();
-      toast("更新已准备，可以重启客户端");
-    } catch (error) { toast(error.message, true); }
-    finally { stopUpdatePolling(); await pollUpdateStatus(); }
+      downloaded = true;
+    } catch (error) {
+      failUpdate(error.message);
+    } finally {
+      stopUpdatePolling();
+    }
+    if (!downloaded) {
+      await pollUpdateStatus();
+      return;
+    }
+    // The download alone leaves the client exactly where it was, so the switch
+    // follows without a second click - that in-between state is the one nobody
+    // could interpret.
+    if (state.updates?.dependency_change) {
+      const command = state.updates.install_command || "sudo bash deploy/install_ubuntu.sh";
+      failUpdate(`版本 ${String(revision).slice(0, 12)} 改动了 Python 依赖，界面不能安装；请在服务器上执行 ${command}`);
+      return;
+    }
+    await switchAndRestart(revision, true);
   }
 
-  async function restartUpdate() {
-    const button = $("#restart-update");
-    const targetRevision = state.updates?.staged_revision || state.updates?.current_revision || "";
-    const activatesUpdate = !!state.updates?.staged_revision;
+  async function restartClient() {
+    state.updateFailure = "";
+    state.updateNotice = "";
+    await switchAndRestart("", false);
+  }
+
+  async function switchAndRestart(targetRevision, activate) {
     const archiveBusy = !!state.runtime?.running;
-    button.disabled = true;
-    $("#update-detail").textContent = archiveBusy
-      ? "正在安全暂停当前归档任务；随后重启客户端并自动恢复任务..."
-      : activatesUpdate
-        ? "正在切换更新并重启客户端，等待新版本上线..."
+    state.updateBusy = true;
+    state.updateNotice = archiveBusy
+      ? "正在安全暂停当前归档任务，随后切换版本并重启客户端..."
+      : activate
+        ? "正在切换新版本并重启客户端，等待新版本上线..."
         : "正在重启客户端，等待服务恢复...";
-    $("#update-detail").className = "update-detail";
+    renderUpdates();
     try {
-      await api("/api/update/restart", { method: "POST", body: "{}" });
+      await api("/api/update/restart", { method: "POST", body: JSON.stringify({ activate: !!activate }) });
     } catch (error) {
-      const blocked = /未能在 30 秒内安全暂停|归档任务正在运行|更新助手未安装|更新助手拒绝|无法连接更新助手/.test(error.message);
-      if (blocked) {
-        toast(error.message, true);
-        button.disabled = false;
+      if (!error.offline) {
+        // The server answered, so it is alive and refusing: show the reason.
+        // Guessing "it must be restarting" is what left the panel stuck.
+        state.updateBusy = false;
+        failUpdate(error.message);
         await pollUpdateStatus();
         return;
       }
-      // 服务重启时连接可能先断开，继续用版本标记确认是否已经切换。
+      // A dropped connection is the only thing that means the service went away.
     }
     toast("客户端正在重启，页面会自动刷新");
-    waitForClientRevision(targetRevision, 0);
+    waitForClientRevision(activate ? targetRevision : "", 0);
   }
 
   function waitForClientRevision(targetRevision, attempt) {
+    const limit = 90;
     setTimeout(async () => {
       try {
         const response = await fetch("/api/update/status", { credentials: "same-origin", cache: "no-store" });
@@ -665,11 +757,17 @@
       } catch (error) {
         // 服务切换期间短暂断开是预期的，继续等待恢复。
       }
-      if (attempt < 20) {
+      if (attempt < limit) {
+        // On a 2 vCPU box a restart plus application start can take tens of
+        // seconds; the elapsed count is what separates "still working" from
+        // "stuck", which was the whole complaint about the old flow.
+        state.updateNotice = `客户端正在重启，已等待 ${attempt + 1} 秒，恢复后会自动刷新页面...`;
+        renderUpdates();
         waitForClientRevision(targetRevision, attempt + 1);
       } else {
-        toast("重启结果暂时无法确认，请手动刷新页面", true);
-        $("#restart-update").disabled = false;
+        state.updateBusy = false;
+        state.updateNotice = "";
+        failUpdate("等待超过 90 秒仍未确认新版本已启动，请手动刷新页面核对当前版本。");
         await pollUpdateStatus();
       }
     }, 1000);
@@ -1305,7 +1403,11 @@
       renderAll();
       renderUpdates();
     } catch (error) {
-      $("#connection-state").textContent = "连接中断"; $("#connection-state").className = "status-dot bad";
+      // During a restart we asked for, a failed poll is expected progress, not
+      // a fault - saying 连接中断 there is what made the old flow look broken.
+      const restarting = !!state.updateBusy;
+      $("#connection-state").textContent = restarting ? "重启中" : "连接中断";
+      $("#connection-state").className = `status-dot ${restarting ? "warn" : "bad"}`;
     }
     scheduleRefresh();
   }
@@ -1352,8 +1454,8 @@
   $("#transfer-open").addEventListener("click", () => switchPage("jobs"));
   $("#remote-download").addEventListener("click", downloadDate);
   $("#check-update").addEventListener("click", checkUpdate);
-  $("#download-update").addEventListener("click", downloadUpdate);
-  $("#restart-update").addEventListener("click", restartUpdate);
+  $("#install-update").addEventListener("click", installUpdate);
+  $("#restart-update").addEventListener("click", restartClient);
   $("#save-runtime-settings").addEventListener("click", () => saveSettings("runtime"));
   $("#save-profile-settings").addEventListener("click", () => saveSettings("profiles"));
   $("#save-web-settings").addEventListener("click", () => saveSettings("web"));

@@ -146,6 +146,47 @@ class UpdateManager:
                 return value
         return "unknown"
 
+    def _requirement_lines(self, path: Path) -> list[str]:
+        try:
+            return path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+    def _dependency_change(self, revision: str) -> bool:
+        """Whether this release needs the Ubuntu install script rather than the page.
+
+        The privileged helper swaps Python files and never runs pip, so it
+        refuses to activate a release whose requirements differ from the running
+        one.  Reproducing its comparison here is what lets the page say so
+        before the user starts an operation that cannot finish - the same
+        judgement, made early enough to be useful.
+        """
+        live = self.app_root / "requirements.txt"
+        if not live.is_file():
+            # The helper skips its own check in this case, so nothing is refused.
+            return False
+        staged = self.update_root / revision / "requirements.txt"
+        if not staged.is_file():
+            return False
+        return self._requirement_lines(staged) != self._requirement_lines(live)
+
+    def install_command(self) -> str:
+        return "sudo bash deploy/install_ubuntu.sh"
+
+    def ensure_switchable(self) -> None:
+        """Refuse a version switch the helper is certain to reject.
+
+        Refusing here also protects the running archive task: the caller stops
+        it before asking the helper, and stopping work for an operation that
+        cannot succeed costs a pass for nothing.
+        """
+        status = self.status()
+        if status.get("staged_revision") and status.get("dependency_change"):
+            raise RuntimeError(
+                "这一版更新改动了 Python 依赖，界面不能安装；"
+                f"请在服务器上执行 {self.install_command()}"
+            )
+
     def _request_json(self, url: str) -> dict[str, Any]:
         request = urllib.request.Request(
             url,
@@ -199,6 +240,8 @@ class UpdateManager:
             "latest": latest,
             "staged_revision": staged,
             "update_available": bool(remote and current != remote),
+            "dependency_change": bool(staged) and self._dependency_change(staged),
+            "install_command": self.install_command(),
             "helper_available": Path(self.helper_socket).exists(),
             "operation": self._operation_status(),
         }
@@ -312,8 +355,14 @@ class UpdateManager:
         request = {"action": "activate", "revision": revision}
         return self._helper_request(request)
 
-    def restart(self) -> dict[str, Any]:
-        staged = str(self.status().get("staged_revision") or "")
+    def restart(self, *, activate: bool = True) -> dict[str, Any]:
+        """Restart the client, switching to the staged release unless told not to.
+
+        Maintenance restarts pass ``activate=False`` so a staged update is not
+        installed as a side effect of restarting a stuck client - the two are
+        separate operations with separate buttons.
+        """
+        staged = str(self.status().get("staged_revision") or "") if activate else ""
         return self._helper_request({"action": "restart", "revision": staged})
 
     def _helper_request(self, payload: dict[str, Any]) -> dict[str, Any]:

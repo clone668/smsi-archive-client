@@ -330,7 +330,7 @@ def test_restart_safely_stops_archive_service_before_calling_helper(tmp_path) ->
         csrf = _login(client, store)
         service.status = lambda: {"running": True}
         service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
-        updater.restart = lambda: calls.append(("restart", None)) or {"restarted": True}
+        updater.restart = lambda **options: calls.append(("restart", options)) or {"restarted": True}
 
         response = client.post(
             "/api/update/restart",
@@ -339,7 +339,7 @@ def test_restart_safely_stops_archive_service_before_calling_helper(tmp_path) ->
         )
 
         assert response.status_code == 200
-        assert calls == [("stop", 30), ("restart", None)]
+        assert calls == [("stop", 30), ("restart", {"activate": True})]
     finally:
         service.stop = original_stop
         service.stop()
@@ -362,8 +362,8 @@ def test_restart_failure_resumes_archive_service(tmp_path) -> None:
         service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
         service.start = lambda: calls.append(("start", None))
 
-        def fail_restart():
-            calls.append(("restart", None))
+        def fail_restart(**options):
+            calls.append(("restart", options))
             raise RuntimeError("更新助手拒绝操作")
 
         updater.restart = fail_restart
@@ -375,7 +375,7 @@ def test_restart_failure_resumes_archive_service(tmp_path) -> None:
 
         assert response.status_code == 409
         assert response.get_json()["error"] == "更新助手拒绝操作"
-        assert calls == [("stop", 30), ("restart", None), ("start", None)]
+        assert calls == [("stop", 30), ("restart", {"activate": True}), ("start", None)]
     finally:
         service.stop = original_stop
         service.start = original_start
@@ -398,7 +398,7 @@ def test_restart_pause_timeout_schedules_archive_service_resume(tmp_path) -> Non
         service.status = lambda: {"running": True}
         service.stop = lambda timeout=30: calls.append(("stop", timeout)) or False
         service.resume_when_stopped = lambda: calls.append(("resume", None))
-        updater.restart = lambda: calls.append(("restart", None))
+        updater.restart = lambda **options: calls.append(("restart", options))
 
         response = client.post(
             "/api/update/restart",
@@ -412,4 +412,82 @@ def test_restart_pause_timeout_schedules_archive_service_resume(tmp_path) -> Non
     finally:
         service.stop = original_stop
         service.resume_when_stopped = original_resume
+        service.stop()
+
+
+def _stage_release_with_new_dependency(updater) -> str:
+    """Stage a release whose requirements differ from the running client's."""
+    revision = "c" * 40
+    release = updater.update_root / revision
+    release.mkdir(parents=True)
+    live = (updater.app_root / "requirements.txt").read_text(encoding="utf-8")
+    (release / "requirements.txt").write_text(
+        live + "\npyarrow==17.0.0\n", encoding="utf-8"
+    )
+    updater.metadata_path.write_text(
+        '{"revision":"' + revision + '"}', encoding="utf-8"
+    )
+    return revision
+
+
+def test_version_switch_refuses_dependency_change_before_pausing_archive(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    updater = app.extensions["smsi_update_manager"]
+    original_stop = service.stop
+    calls = []
+    try:
+        csrf = _login(client, store)
+        _stage_release_with_new_dependency(updater)
+        service.status = lambda: {"running": True}
+        service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
+        updater.restart = lambda **options: calls.append(("restart", options))
+
+        response = client.post(
+            "/api/update/restart",
+            json={"activate": True},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert response.status_code == 409
+        assert "install_ubuntu.sh" in response.get_json()["error"]
+        # Refusing before the stop is the point: a task paused for an operation
+        # the helper would reject has lost an archive pass for nothing.
+        assert calls == []
+    finally:
+        service.stop = original_stop
+        service.stop()
+
+
+def test_maintenance_restart_ignores_a_staged_dependency_change(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    updater = app.extensions["smsi_update_manager"]
+    original_stop = service.stop
+    calls = []
+    try:
+        csrf = _login(client, store)
+        _stage_release_with_new_dependency(updater)
+        service.status = lambda: {"running": False}
+        service.stop = lambda timeout=30: calls.append(("stop", timeout)) or True
+        updater.restart = lambda **options: calls.append(("restart", options)) or {"restarted": True}
+
+        response = client.post(
+            "/api/update/restart",
+            json={"activate": False},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert response.status_code == 200
+        assert calls == [("stop", 30), ("restart", {"activate": False})]
+    finally:
+        service.stop = original_stop
         service.stop()
