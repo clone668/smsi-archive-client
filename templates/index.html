@@ -42,15 +42,14 @@
         <section class="runtime-strip" aria-live="polite">
           <span id="runtime-client-state" class="status-dot good">客户端在线</span>
           <span id="runtime-automation">自动同步 --</span>
-          <span id="runtime-task">当前任务 --</span>
+          <span id="runtime-last-scan">上次成功检查 --</span>
           <span id="runtime-next-scan">下次检查 --</span>
         </section>
 
         <section class="metric-grid">
+          <article class="metric" id="metric-actionable-card"><span>需要处理</span><strong id="metric-actionable">--</strong><small id="metric-actionable-detail">归档与验证异常</small></article>
           <article class="metric"><span>双服务器共同完整</span><strong id="metric-common-date">--</strong><small id="metric-common-detail">两侧均通过恢复验证</small></article>
           <article class="metric"><span>各服务器最新日期</span><strong id="metric-profile-dates">--</strong><small id="metric-profile-detail">正在读取</small></article>
-          <article class="metric"><span>需要处理</span><strong id="metric-actionable">--</strong><small id="metric-actionable-detail">归档与验证异常</small></article>
-          <article class="metric"><span>本地磁盘</span><strong id="metric-disk">--</strong><small id="metric-disk-detail">--</small></article>
         </section>
 
         <section id="overview-active-job" class="content-band task-focus">
@@ -219,7 +218,7 @@
               <label>推送级别<select name="alert_min_level"><option value="warning">警告及以上</option><option value="error">仅错误</option></select></label>
               <label>多久没有成功检查就告警（小时）<input name="alert_stale_hours" type="number" min="1" max="168"></label>
             </div>
-            <p id="alert-health" class="update-detail">告警通道状态未知。</p>
+            <p id="alert-health" class="inline-note">告警通道状态未知。</p>
           </section>
 
           <section class="content-band settings-section">
@@ -239,7 +238,7 @@
             </div>
           </form>
           <section class="content-band settings-section">
-            <div class="section-heading"><div><h2>Web 服务</h2><p>保存后需要重启客户端才会生效</p></div><button id="save-web-settings" type="button" class="button secondary">保存 Web 设置</button></div>
+            <div class="section-heading"><div><h2>Web 服务</h2><p>保存后用下方“客户端更新”里的维护重启生效</p></div><button id="save-web-settings" type="button" class="button secondary">保存 Web 设置</button></div>
             <div class="form-grid one-column" id="web-settings">
               <label>监听地址<input name="web_host" form="settings-form" required></label>
               <label>监听端口<input name="web_port" form="settings-form" type="number" min="1" max="65535" required></label>
@@ -252,19 +251,17 @@
           <div class="update-version-grid embedded">
             <article class="metric compact"><span>当前版本</span><strong id="update-current">--</strong><small>正在运行</small></article>
             <article class="metric compact"><span>最新版本</span><strong id="update-latest">--</strong><small id="update-release-note">尚未检查</small></article>
-            <article class="metric compact"><span>更新状态</span><strong id="update-state-text">未检查</strong><small id="update-status">点击检查更新开始</small></article>
           </div>
-          <div id="update-blocked-reason" class="workflow-notice hidden" role="status" aria-live="polite"></div>
+          <p id="update-message" class="workflow-notice" role="status" aria-live="polite">点击“检查更新”读取 GitHub 上的最新版本。</p>
           <div class="update-actions" aria-label="客户端更新操作">
-            <div class="update-step"><span class="step-number">1</span><div><strong>检查版本</strong><small>只读取 GitHub 版本信息</small></div><button id="check-update" class="button secondary">检查更新</button></div>
-            <div class="update-step"><span class="step-number">2</span><div><strong>更新版本</strong><small id="install-hint">下载校验后自动切换并刷新页面</small></div><button id="install-update" class="button primary" disabled>更新版本</button></div>
-            <div class="update-step maintenance"><span class="step-number" aria-hidden="true">↻</span><div><strong>维护重启</strong><small id="restart-hint">只重启当前版本，不切换</small></div><button id="restart-update" class="button secondary">重启客户端</button></div>
+            <button id="install-update" class="button primary" disabled>更新版本</button>
+            <button id="check-update" class="button secondary">检查更新</button>
+            <button id="restart-update" class="button quiet">维护重启</button>
           </div>
           <div id="update-progress" class="update-progress" aria-live="polite">
             <div class="update-progress-head"><span id="update-phase">等待操作</span><strong id="update-percent">--</strong></div>
             <div id="update-progress-track" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuetext="尚未开始"><span id="update-progress-bar"></span></div>
             <div class="update-progress-detail"><span id="update-bytes">--</span><span id="update-speed">--</span><span id="update-eta">--</span></div>
-            <p id="update-detail" class="update-detail">尚未开始更新操作。</p>
           </div>
         </section>
       </section>

@@ -116,6 +116,26 @@
     renderTransferDock();
   }
 
+  // One fact, two places.  The sidebar dot and the overview strip both answer
+  // "is the client answering", and when they were written independently they
+  // could contradict each other - during a restart the sidebar said 重启中 while
+  // the strip still claimed 客户端在线.
+  const livenessStates = {
+    online: ["客户端在线", "在线", "good"],
+    degraded: ["客户端降级", "降级", "bad"],
+    restarting: ["正在重启", "重启中", "warn"],
+    offline: ["连接中断", "连接中断", "bad"],
+  };
+
+  function setLiveness(kind, detail = "") {
+    const [stripText, sidebarText, tone] = livenessStates[kind] || livenessStates.online;
+    for (const [node, text] of [[$("#runtime-client-state"), stripText], [$("#connection-state"), sidebarText]]) {
+      node.textContent = text;
+      node.className = `status-dot ${tone}`;
+      node.title = detail;
+    }
+  }
+
   function renderMetrics() {
     const runtime = state.runtime || {};
     const currentJob = activeJob();
@@ -135,32 +155,37 @@
     const actionableStatuses = new Set(["error", "remote_failed", "manifest_changed", "interrupted", "cancelled"]);
     const actionableDays = state.days.filter(item => actionableStatuses.has(item.status));
     const comparisonIssues = state.comparisons.filter(item => ["critical", "attention"].includes(item.data_status || item.status));
-    const taskLabel = checking ? "检查中" : runtime.running ? "执行中" : currentJob ? "排队中" : "空闲";
-    $("#runtime-client-state").textContent = runtime.disk_error ? "客户端降级" : "客户端在线";
-    $("#runtime-client-state").className = `status-dot ${runtime.disk_error ? "bad" : "good"}`;
+    setLiveness(runtime.disk_error ? "degraded" : "online", String(runtime.disk_error || ""));
     $("#runtime-automation").textContent = `自动同步 ${runtime.auto_download ? "已开启" : "已暂停"}`;
-    $("#runtime-task").textContent = `当前任务 ${taskLabel}`;
+    // The strip answers "is the loop alive": the two scan times bracket it.
+    // 当前任务 used to sit here too, but the sidebar always shows the task with a
+    // percentage and the band right below shows it in full - three copies of one
+    // fact in one screen, while 上次成功检查 was buried on the settings page.
+    $("#runtime-last-scan").textContent = `上次成功检查 ${timeText(runtime.last_successful_scan_at)}`;
     $("#runtime-next-scan").textContent = `下次检查 ${timeText(runtime.next_scan_at)}`;
     $("#metric-common-date").textContent = commonDates.at(-1) || "尚无";
     $("#metric-common-detail").textContent = commonDates.length ? `${commonDates.length} 个共同完整日期` : "等待两侧完成同一归档日";
     $("#metric-profile-dates").textContent = latestByProfile.every(item => item.date === latestByProfile[0]?.date) && latestByProfile.length
       ? latestByProfile[0].date : "日期不同";
     $("#metric-profile-detail").textContent = latestByProfile.map(item => `${item.name} ${item.date}`).join(" · ") || "尚未配置采集服务器";
-    $("#metric-actionable").textContent = String(actionableDays.length + comparisonIssues.length);
-    $("#metric-actionable-detail").textContent = actionableDays.length || comparisonIssues.length
+    // 需要处理 is the first question an operator has, so it leads the row and
+    // carries the colour; 严重 means something is already wrong rather than
+    // merely unfinished.
+    const actionableTotal = actionableDays.length + comparisonIssues.length;
+    const severe = actionableDays.some(item => ["error", "remote_failed", "manifest_changed"].includes(item.status))
+      || comparisonIssues.some(item => (item.data_status || item.status) === "critical");
+    $("#metric-actionable").textContent = String(actionableTotal);
+    $("#metric-actionable-card").className = `metric ${actionableTotal ? (severe ? "bad" : "warn") : "good"}`;
+    $("#metric-actionable-detail").textContent = actionableTotal
       ? `归档 ${actionableDays.length} · 对比 ${comparisonIssues.length}` : "当前没有需要处理的问题";
     const disk = runtime.disk || {};
     const ratio = disk.total ? Math.round(Number(disk.used) / Number(disk.total) * 100) : 0;
-    $("#metric-disk").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
-    $("#metric-disk-detail").textContent = runtime.disk_error || `可用 ${bytes(disk.free)} / ${bytes(disk.total)}`;
     $("#sidebar-storage-label").textContent = runtime.disk_error ? "不可用" : `${ratio}%`;
     $("#sidebar-storage-detail").textContent = runtime.disk_error || `${bytes(disk.free)} 可用，共 ${bytes(disk.total)}`;
     const storageBar = $("#sidebar-storage-bar");
     storageBar.style.width = `${ratio}%`;
     storageBar.className = ratio >= 92 ? "bad" : ratio >= 80 ? "warn" : "";
-    $("#connection-state").textContent = checking ? "状态检查中" : runtime.running ? "任务执行中" : "客户端在线";
-    $("#connection-state").className = "status-dot good";
-    $("#cancel-task").classList.toggle("hidden", !activeJob());
+    $("#cancel-task").classList.toggle("hidden", !currentJob);
     $("#cancel-task").textContent = checking ? "停止检查" : "取消任务";
     $("#scan-only").disabled = taskBusy();
     $("#scan-download").disabled = taskBusy();
@@ -192,7 +217,48 @@
     return { value, total, done, objects, objectsDone, percent, scanning, scanTotal, scanDone };
   }
 
+  // 总览 and 任务 render the same task from the same numbers.  They used to be
+  // two hand-written branches that had drifted into different wording for the
+  // same state, which is how a panel stops being believable.
+  const taskPanels = {
+    "overview-job": {
+      title: "#overview-job-title", detail: "#overview-job-detail", state: "#overview-job-state",
+      object: "#overview-job-object", percent: "#overview-job-percent", bar: "#overview-job-progress",
+      objects: "#overview-job-objects", bytes: "#overview-job-bytes", speed: "#overview-job-speed",
+      eta: "#overview-job-eta", concurrency: "#overview-job-concurrency", limit: "#overview-job-limit",
+    },
+    jobs: {
+      title: "#jobs-active-title", detail: "#jobs-active-detail", state: "#jobs-active-state",
+      object: "#jobs-current-object", percent: "#jobs-progress-percent", bar: "#jobs-progress-bar",
+      objects: "#jobs-progress-objects", bytes: "#jobs-progress-bytes", speed: "#jobs-progress-speed",
+      eta: "#jobs-progress-eta", concurrency: "#jobs-progress-concurrency", limit: "#jobs-progress-limit",
+    },
+  };
+
+  function taskDetailText(job, values) {
+    const live = values.value;
+    if (!job) return "等待自动检查或手动操作";
+    if (job.status === "cancelling") return "正在停止任务，已完成对象会保留";
+    const where = live.profile_id ? ` · ${live.profile_id}` : "";
+    if (live.phase === "discovering") return `正在读取远端归档日期清单${where}`;
+    if (values.scanning) return `正在核对远端归档日期与本地状态${live.archive_date ? ` · ${live.archive_date}` : where}`;
+    if (live.phase === "downloading") return "正在下载并校验对象";
+    return job.detail || "等待后台任务";
+  }
+
+  function taskObjectText(job, values) {
+    const live = values.value;
+    if (values.scanning) {
+      return live.phase === "discovering" ? "读取归档日期清单"
+        : live.archive_date ? `检查 ${live.archive_date}` : "准备检查归档日期";
+    }
+    if (live.current_object) return live.current_object.split("/").at(-1);
+    return job?.archive_date || "等待任务";
+  }
+
   function renderTaskPanel(prefix, job, progress) {
+    const nodes = taskPanels[prefix];
+    if (!nodes) return;
     const values = progressValues(job, progress);
     const live = values.value;
     const active = job && ["queued", "running", "cancelling"].includes(job.status);
@@ -201,42 +267,28 @@
       : job
       ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
       : ["空闲", ""];
-    if (prefix === "overview-job") {
-      $("#overview-job-title").textContent = values.scanning ? "归档状态检查" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
-      $("#overview-job-detail").textContent = job
-        ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.phase === "discovering" ? `正在读取远端归档日期清单${live.profile_id ? ` · ${live.profile_id}` : ""}` : values.scanning ? `正在检查远端归档日期与本地状态${live.profile_id ? ` · ${live.profile_id}` : ""}` : progress.phase === "downloading" ? "正在下载并校验对象" : job.detail || "等待后台任务")
-        : "自动检查会在计划时间运行";
-      $("#overview-job-state").textContent = label;
-      $("#overview-job-state").className = `state-pill ${tone}`;
-      $("#overview-job-object").textContent = values.scanning
-        ? (live.phase === "discovering" ? "读取归档日期清单" : live.archive_date ? `检查 ${live.archive_date}` : "准备检查归档日期")
-        : live.current_object ? live.current_object.split("/").at(-1) : (job?.archive_date || "等待任务");
-      $("#overview-job-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "--";
-      $("#overview-job-progress").style.width = `${values.percent}%`;
-      $("#overview-job-objects").textContent = values.scanning ? `日期 ${values.scanDone}/${values.scanTotal || "--"}` : `对象 ${values.objectsDone}/${values.objects || "--"}`;
-      $("#overview-job-bytes").textContent = values.scanning ? "数据 无需传输" : `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
-      $("#overview-job-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
-      $("#overview-job-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
-      $("#overview-job-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
-      $("#overview-job-limit").textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
-      return;
-    }
-    $("#jobs-active-title").textContent = values.scanning ? "归档状态检查" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
-    $("#jobs-active-detail").textContent = job
-      ? (job.status === "cancelling" ? "正在停止任务，已完成对象会保留" : live.phase === "discovering" ? `正在读取 ${live.profile_id || "采集服务器"} 的远端日期清单` : values.scanning ? `正在核对 ${live.archive_date || live.profile_id || "归档日期"}` : live.current_object || job.detail || "等待后台任务")
-      : "等待自动检查或手动操作";
-    $("#jobs-active-state").textContent = label;
-    $("#jobs-active-state").className = `state-pill ${tone}`;
-    $("#jobs-current-object").textContent = values.scanning ? (live.archive_date || "读取日期清单") : live.current_object || job?.archive_date || "--";
-    $("#jobs-progress-percent").textContent = job ? `${values.percent.toFixed(1)}%` : "0%";
-    $("#jobs-progress-bar").style.width = `${values.percent}%`;
-    $("#jobs-progress-objects").textContent = values.scanning ? `日期 ${values.scanDone}/${values.scanTotal || "--"}` : `对象 ${values.objectsDone}/${values.objects || "--"}`;
-    $("#jobs-progress-bytes").textContent = values.scanning ? "数据 无需传输" : `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
-    $("#jobs-progress-speed").textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
-    $("#jobs-progress-eta").textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
-    $("#jobs-progress-concurrency").textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
-    $("#jobs-progress-limit").textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
-    $("#jobs-cancel-task").disabled = !active;
+    $(nodes.title).textContent = values.scanning
+      ? "归档状态检查"
+      : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "当前没有运行任务";
+    $(nodes.detail).textContent = taskDetailText(job, values);
+    $(nodes.state).textContent = label;
+    $(nodes.state).className = `state-pill ${tone}`;
+    const object = $(nodes.object);
+    object.textContent = taskObjectText(job, values);
+    object.title = live.current_object || "";
+    $(nodes.percent).textContent = job ? `${values.percent.toFixed(1)}%` : "--";
+    $(nodes.bar).style.width = `${values.percent}%`;
+    $(nodes.objects).textContent = values.scanning
+      ? `日期 ${values.scanDone}/${values.scanTotal || "--"}`
+      : `对象 ${values.objectsDone}/${values.objects || "--"}`;
+    $(nodes.bytes).textContent = values.scanning
+      ? "数据 无需传输"
+      : `数据 ${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}`;
+    $(nodes.speed).textContent = `速度 ${live.speed_bytes_per_second ? `${bytes(live.speed_bytes_per_second)}/秒` : "--"}`;
+    $(nodes.eta).textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
+    $(nodes.concurrency).textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
+    $(nodes.limit).textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
+    if (prefix === "jobs") $("#jobs-cancel-task").disabled = !active;
   }
 
   function renderJobs() {
@@ -268,7 +320,10 @@
       : job
       ? (job.phase === "recovering" ? jobStatusMap.recovering : jobStatusMap[job.status] || [job.status || "未知", ""])
       : ["空闲", ""];
-    $("#transfer-dock").classList.toggle("hidden", !active || state.currentPage === "jobs");
+    // The dock is for pages that cannot show the task themselves.  总览 and 任务
+    // both already render the full band, and two live copies of one transfer on
+    // screen at once just cost vertical space.
+    $("#transfer-dock").classList.toggle("hidden", !active || ["jobs", "overview"].includes(state.currentPage));
     $("#transfer-dock").classList.toggle("busy", active);
     $("#transfer-dock-title").textContent = values.scanning ? "正在检查归档状态" : job ? `${jobLabel(job)} · ${job.profile_id || "全部采集服务器"}` : "传输空闲";
     $("#transfer-dock-detail").textContent = job
@@ -510,46 +565,47 @@
     const archiveBusy = !!state.runtime?.running;
     const dependencyChange = !!updates.dependency_change;
     const installCommand = String(updates.install_command || "sudo bash deploy/install_ubuntu.sh");
-    let label = "未检查";
-    let tone = "";
-    let status = `当前版本 ${current}，尚未检查远端版本。`;
-    if (state.updateBusy) {
-      label = "正在重启";
-      tone = "warn";
-      status = String(state.updateNotice || "客户端正在重启，恢复后会自动刷新页面。");
-    } else if (active) {
-      label = updatePhaseMap[phase] || "更新进行中";
-      tone = "warn";
-      status = String(operation.detail || label);
-    } else if (phase === "failed") {
-      label = "更新失败";
-      tone = "bad";
-      status = String(operation.error || operation.detail || "更新操作失败");
-    } else if (dependencyChange) {
-      label = "需服务器安装";
-      tone = "warn";
-      status = `版本 ${staged} 改动了 Python 依赖，界面不能安装；请在服务器上执行 ${installCommand}`;
-    } else if (staged) {
-      label = "待切换";
-      tone = "good";
-      status = archiveBusy ? `版本 ${staged} 已下载；切换时会安全暂停当前任务，启动后继续。` : `版本 ${staged} 已下载校验，再点“更新版本”即可切换。`;
-    } else if (remote && updates.update_available) {
-      label = "有新版本";
-      tone = "warn";
-      status = `发现版本 ${remote}，当前运行 ${current}。`;
-    } else if (remote) {
-      label = "已是最新";
-      tone = "good";
-      status = `当前已运行最新版本 ${remote}。`;
-    }
+    // A refusal has to outlive the next poll: afterwards the operation record
+    // still says "ready", and a toast is gone by the time the user looks up.
+    const failure = String(state.updateFailure || "");
+    const activeLabel = updatePhaseMap[phase] || "更新进行中";
+    // 归档任务在跑时，这句话附在结论后面而不是替换掉结论 - 否则“新版本已下载”会在
+    // 任务运行期间整句消失。
+    const archiveNote = archiveBusy
+      ? `当前${archivePhaseMap[state.runtime?.progress?.phase] || "归档任务正在运行"}，操作会先安全暂停任务、保留已完成对象，启动后继续。`
+      : "";
+    // One panel, one sentence.  This was two parallel chains feeding a card
+    // title, a subtitle, a blocked-reason line, two button hints and a detail
+    // line - up to five near-identical sentences on screen at once.  Most
+    // urgent first; every branch says what is true and what to do next.
+    const [label, tone, message] = failure
+      ? ["更新失败", "bad", failure]
+      : state.updateBusy
+      ? ["正在重启", "warn", String(state.updateNotice || "客户端正在重启，恢复后会自动刷新页面，请勿关闭。")]
+      : active
+      ? [activeLabel, "warn", String(operation.detail || `${activeLabel}，完成后会自动切换版本、重启并刷新页面。`)]
+      : phase === "failed"
+      ? ["更新失败", "bad", String(operation.error || operation.detail || "上一次更新操作失败，可以重试，或在服务器上执行安装脚本。")]
+      : !updates.helper_available
+      ? ["助手不可用", "bad", "Ubuntu 更新助手不可用，现在既不能切换版本，也不能从这里重启；请在服务器上检查更新助手服务。"]
+      : dependencyChange
+      ? ["需服务器安装", "warn", `版本 ${staged || remote} 改动了 Python 依赖。更新助手只替换代码、不安装依赖，界面装不了这一版，请在服务器上执行：${installCommand}`]
+      : staged
+      ? ["待切换", "good", `版本 ${staged} 已下载并校验，点“更新版本”完成切换和刷新。${archiveNote}`]
+      : remote && updates.update_available
+      ? ["有新版本", "warn", `发现版本 ${remote}，当前运行 ${current}。点“更新版本”一次完成下载、校验、切换和刷新。${archiveNote}`]
+      : remote
+      ? ["已是最新", "good", `当前已运行最新版本 ${remote}。`]
+      : ["未检查", "", `当前运行版本 ${current}，点“检查更新”读取 GitHub 上的最新版本。`];
 
     $("#update-current").textContent = current;
     $("#update-latest").textContent = remote || "--";
     $("#update-release-note").textContent = latest.message || "尚未读取版本说明";
-    $("#update-state-text").textContent = label;
-    $("#update-status").textContent = status;
     $("#update-state").textContent = label;
     $("#update-state").className = `state-pill ${tone}`.trim();
+    const messageNode = $("#update-message");
+    messageNode.textContent = message;
+    messageNode.className = `workflow-notice ${tone}`.trim();
     $("#check-update").disabled = busy;
     // 更新版本 covers download, switch and restart, so it needs the helper and
     // is available whenever there is either a new version or a staged one.
@@ -558,47 +614,16 @@
       || !updates.helper_available
       || !(updates.update_available || staged);
     $("#restart-update").disabled = busy || !updates.helper_available;
-    const blockedReason = $("#update-blocked-reason");
-    $("#install-update").title = "下载、校验、切换并重启客户端";
-    $("#restart-update").title = "重启当前运行版本，不会切换版本";
-    if (busy) {
-      blockedReason.textContent = state.updateBusy
-        ? String(state.updateNotice || "客户端正在重启，请勿关闭页面")
-        : String(operation.detail || "更新操作正在进行");
-      blockedReason.className = "workflow-notice warn";
-    } else if (!updates.helper_available) {
-      blockedReason.textContent = "更新助手不可用，暂时不能切换版本，也不能从这里重启。";
-      blockedReason.className = "workflow-notice bad";
-      $("#install-update").title = "更新助手不可用";
-      $("#restart-update").title = "更新助手不可用";
-    } else if (dependencyChange) {
-      blockedReason.textContent = `这一版改动了 Python 依赖。更新助手只替换代码、不安装依赖，所以界面装不了这一版，需要在服务器上执行：${installCommand}`;
-      blockedReason.className = "workflow-notice warn";
-      $("#install-update").title = "这一版需要在服务器上安装";
-    } else if (archiveBusy) {
-      const progress = state.runtime?.progress || {};
-      const archivePhase = archivePhaseMap[progress.phase] || "归档任务正在运行";
-      const objects = progress.object_count ? ` · ${Number(progress.objects_done || 0)}/${Number(progress.object_count)} 个对象` : "";
-      blockedReason.textContent = `${archivePhase}${objects}；更新或重启会安全暂停当前任务，已完成对象和临时文件会保留，启动后继续。`;
-      blockedReason.className = "workflow-notice warn";
-      $("#install-update").title = "安全暂停当前任务，切换版本并重启";
-      $("#restart-update").title = "安全暂停当前任务并重启当前版本";
-    } else if (staged) {
-      blockedReason.textContent = "更新包已下载并校验，点“更新版本”完成切换和刷新。";
-      blockedReason.className = "workflow-notice good";
-      $("#install-update").title = "切换已校验的更新包并重启";
-    } else {
-      blockedReason.textContent = "客户端当前空闲。“更新版本”会一次完成下载、校验、切换和刷新。";
-      blockedReason.className = "workflow-notice";
-    }
-    $("#install-hint").textContent = !updates.helper_available
-      ? "更新助手不可用"
-      : dependencyChange
-        ? "这一版需在服务器上安装"
-        : staged ? "已下载，点一次完成切换" : "下载校验后自动切换并刷新页面";
-    $("#restart-hint").textContent = updates.helper_available
-      ? "只重启当前版本，不切换"
-      : "Ubuntu 更新助手不可用";
+    // Tooltips carry the per-button nuance that used to sit under every button as
+    // permanent text, repeating what the message line already said.
+    $("#install-update").title = !updates.helper_available ? "更新助手不可用"
+      : dependencyChange ? "这一版需要在服务器上执行安装脚本"
+      : archiveBusy ? "安全暂停当前归档任务，切换版本并重启"
+      : staged ? "切换已校验的更新包并重启"
+      : "下载、校验、切换并重启客户端";
+    $("#restart-update").title = !updates.helper_available ? "更新助手不可用"
+      : archiveBusy ? "安全暂停当前归档任务并重启当前版本"
+      : "重启当前运行版本，不会切换版本";
 
     const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
     const track = $("#update-progress-track");
@@ -618,19 +643,6 @@
     $("#update-bytes").textContent = total ? `${bytes(done)} / ${bytes(total)}` : done ? `已处理 ${bytes(done)}` : "数据量 --";
     $("#update-speed").textContent = Number(operation.speed_bytes_per_second || 0) > 0 ? `${bytes(operation.speed_bytes_per_second)}/秒` : "速度 --";
     $("#update-eta").textContent = operation.eta_seconds != null ? `剩余约 ${durationText(operation.eta_seconds)}` : "剩余时间 --";
-    // A refusal has to outlive the next poll: the operation record still says
-    // "ready", and a toast is gone by the time the user looks up.  This line is
-    // where the reason stays until the next attempt clears it.  The notice is
-    // the same idea for progress the server cannot report - during a restart
-    // the server is not there to be asked.
-    const failure = String(state.updateFailure || "");
-    const notice = String(state.updateNotice || "");
-    $("#update-detail").textContent = failure
-      || notice
-      || operation.error
-      || operation.detail
-      || (staged ? "更新包已下载校验，等待切换。" : "尚未开始更新操作。");
-    $("#update-detail").className = `update-detail${failure || phase === "failed" ? " error" : ""}`;
   }
 
   async function pollUpdateStatus() {
@@ -640,8 +652,9 @@
       state.runtime = { ...(state.runtime || {}), running: !!result.archive_running };
       renderUpdates();
     } catch (error) {
-      $("#update-detail").textContent = error.message;
-      $("#update-detail").className = "update-detail error";
+      const messageNode = $("#update-message");
+      messageNode.textContent = error.message;
+      messageNode.className = "workflow-notice bad";
     }
   }
 
@@ -1405,9 +1418,9 @@
     } catch (error) {
       // During a restart we asked for, a failed poll is expected progress, not
       // a fault - saying 连接中断 there is what made the old flow look broken.
-      const restarting = !!state.updateBusy;
-      $("#connection-state").textContent = restarting ? "重启中" : "连接中断";
-      $("#connection-state").className = `status-dot ${restarting ? "warn" : "bad"}`;
+      // Both indicators move together, or the strip keeps claiming 客户端在线
+      // while the sidebar already says 连接中断.
+      setLiveness(state.updateBusy ? "restarting" : "offline");
     }
     scheduleRefresh();
   }

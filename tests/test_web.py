@@ -35,7 +35,16 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'id="remote-files-body"' in page
         assert 'id="remote-inspector"' in page
         assert 'id="transfer-dock"' in page
-        assert '<span>需要处理</span>' in page
+        # 需要处理是运维第一眼要看的数字，所以排在指标行第一位；磁盘已经常驻侧栏，
+        # 不在总览重复一遍。
+        assert page.index("<span>需要处理</span>") < page.index("<span>双服务器共同完整</span>")
+        assert 'id="metric-disk"' not in page
+        # 更新面板只留一句话，之前那一句状态被拆成 7 个元素反复说。
+        assert page.count('class="workflow-notice"') == 1
+        assert 'id="update-state-text"' not in page
+        assert 'id="update-blocked-reason"' not in page
+        assert 'id="update-detail"' not in page
+        assert 'id="install-hint"' not in page
         assert '<th>数据对比</th>' in page
         assert '<th>归档日数据质量</th>' in page
         assert f"归档中心 · v{__version__}" in page
@@ -44,7 +53,13 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         ).read_text(encoding="utf-8")
         assert 'replace("smsi-runtime-health-assessment/", "")' in script
         assert '"归档状态检查"' in script
-        assert '"状态检查中"' in script
+        # 侧栏圆点和总览条读同一张表，重启期间不会一个说在线、一个说重启中。
+        assert 'restarting: ["正在重启", "重启中", "warn"]' in script
+        assert "function setLiveness(" in script
+        # 总览和任务两页渲染同一个任务，用同一段代码，措辞不会再分叉。
+        assert "const taskPanels = {" in script
+        # 这两页本身就有完整任务条，浮窗只服务其他页面。
+        assert '["jobs", "overview"].includes(state.currentPage)' in script
         assert 'checking ? "停止检查" : "取消任务"' in script
         assert 'const checking = runtime.running &&' in script
         assert 'object_checksum_difference: "校验和"' in script

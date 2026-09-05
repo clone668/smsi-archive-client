@@ -119,14 +119,23 @@ h2 { margin-bottom: 1px; font-size: 15px; }
 .icon-button.loading svg { animation: browser-refresh-spin .85s linear infinite; }
 @keyframes browser-refresh-spin { to { transform: rotate(360deg); } }
 
-.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .metric { min-height: 106px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .metric > span { color: var(--muted); font-size: 12px; font-weight: 650; }
 .metric strong { margin-top: 8px; font-size: 23px; line-height: 1.1; overflow-wrap: anywhere; }
 .metric small { margin-top: auto; padding-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
 .metric.compact { min-height: 102px; }
+/* A count of problems is worth reading before anything else on the page, so it
+   carries the colour instead of hiding inside four identical grey cards. */
+.metric.warn { border-color: var(--warn); }
+.metric.warn strong { color: var(--warn); }
+.metric.bad { border-color: var(--bad); }
+.metric.bad strong { color: var(--bad); }
+.metric.good strong { color: var(--good); }
 .runtime-strip { min-height: 42px; margin-bottom: 10px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
-.runtime-strip .status-dot { color: var(--good); font-weight: 750; }
+/* Only the weight is fixed here; the tone class has to keep its colour, or a
+   degraded client is announced in the same green as a healthy one. */
+.runtime-strip .status-dot { font-weight: 750; }
 
 .content-band { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
 .section-heading { min-height: 52px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -295,26 +304,18 @@ tbody tr:hover { background: var(--surface-2); }
 .transfer-progress .progress-track { height: 5px; }
 .transfer-stats { display: flex; gap: 14px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 
-.update-version-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.update-version-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .update-version-grid.embedded { padding: 12px 14px 0; }
 .update-workflow { overflow: visible; }
 .workflow-notice { margin: 12px 14px 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 650; }
 .workflow-notice.good { border-color: var(--good); background: var(--good-soft); color: var(--good); }
 .workflow-notice.warn { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
 .workflow-notice.bad { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
-.update-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
-.update-step { min-height: 94px; padding: 14px; border-right: 1px solid var(--line); display: grid; grid-template-columns: 28px minmax(0, 1fr); grid-template-rows: auto auto; align-items: start; gap: 3px 10px; }
-.update-step:last-child { border-right: 0; }
-.update-step .step-number { grid-row: 1 / 3; width: 27px; height: 27px; display: grid; place-items: center; border-radius: 50%; background: var(--surface-3); color: var(--muted); font-size: 12px; font-weight: 800; }
-.update-step div { min-width: 0; display: grid; }
-.update-step strong { font-size: 13px; }
-.update-step small { margin-top: 2px; color: var(--muted); font-size: 11px; }
-.update-step .button { grid-column: 2; justify-self: start; margin-top: 8px; }
-/* The maintenance restart is not step three of the update; it is a separate
-   operation that happens to live in the same panel, so it does not wear a
-   step number and sits on its own background. */
-.update-step.maintenance { background: var(--surface-2); }
-.update-step.maintenance .step-number { background: transparent; color: var(--muted); font-size: 16px; font-weight: 600; }
+/* One row of plain buttons.  The numbered steps this replaces implied an order
+   the flow no longer has: 更新版本 does the whole job, 检查更新 is optional and
+   维护重启 is not part of updating at all. */
+.update-actions { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.update-actions .button.quiet { margin-left: auto; }
 .update-progress { padding: 16px 14px 14px; }
 .update-progress-head { margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .update-progress-head span { font-weight: 700; }
@@ -323,8 +324,10 @@ tbody tr:hover { background: var(--surface-2); }
 .progress-track.indeterminate span { width: 34% !important; animation: update-indeterminate 1.2s ease-in-out infinite; }
 @keyframes update-indeterminate { 0% { transform: translateX(-110%); } 100% { transform: translateX(310%); } }
 .update-progress-detail { margin-top: 8px; display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
-.update-detail { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
-.update-detail.error { color: var(--bad); }
+/* A plain explanatory line under a form.  It carries the same 14px inset as
+   .form-grid so it lines up with the fields it explains, instead of sitting
+   flush against the panel edge the way the old .update-detail did. */
+.inline-note { margin: 8px 14px 0; color: var(--muted); font-size: 12px; }
 
 .settings-section { padding-bottom: 14px; }
 .settings-section .section-heading { margin-bottom: 14px; }
@@ -383,11 +386,6 @@ input[readonly] { background: var(--surface-3); color: var(--muted); cursor: not
   .profile-row:nth-child(2n) { border-right: 0; }
   .content-grid { grid-template-columns: 1fr; }
   .profile-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .update-actions { grid-template-columns: 1fr; }
-  .update-step { min-height: 74px; border-right: 0; border-bottom: 1px solid var(--line); grid-template-columns: 28px minmax(0, 1fr) auto; grid-template-rows: 1fr; align-items: center; }
-  .update-step:last-child { border-bottom: 0; }
-  .update-step .step-number { grid-row: auto; }
-  .update-step .button { grid-column: 3; margin: 0; }
   .transfer-dock { left: 196px; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; gap: 12px; }
   .transfer-stats { display: none; }
 }
@@ -453,6 +451,6 @@ input[readonly] { background: var(--surface-3); color: var(--muted); cursor: not
   .file-page-heading .page-description { display: none; }
   .transfer-progress { display: none; }
   .transfer-dock { grid-template-columns: minmax(0, 1fr) auto; }
-  .update-step { grid-template-columns: 28px minmax(0, 1fr); }
-  .update-step .button { grid-column: 2; margin-top: 7px; justify-self: start; }
+  .update-actions .button { flex: 1 1 100%; justify-content: center; }
+  .update-actions .button.quiet { margin-left: 0; }
 }
