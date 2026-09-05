@@ -48,6 +48,12 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'id="install-hint"' not in page
         assert '<th>数据对比</th>' in page
         assert '<th>归档日数据质量</th>' in page
+        # 计数徽章跟着标题走。放在标题栏右端时，它和它数的那个词之间隔着上千像素。
+        assert '<div class="heading-title"><h2>采集服务器</h2><span id="profile-count"' in page
+        assert '<div class="heading-title"><h2>最近任务</h2><span id="jobs-count"' in page
+        # 任务页空闲时不摆一条空进度槽和六个横线：首屏就是收起的，等有任务再展开。
+        assert 'class="task-progress-body hidden" id="jobs-progress-body"' in page
+        assert 'id="jobs-cancel-task" class="button danger hidden"' in page
         assert f"归档中心 · v{__version__}" in page
         script = (
             Path(__file__).resolve().parents[1] / "static" / "app.js"
@@ -68,6 +74,13 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert "item.data_status || item.status ||" in script
         # 空闲时那块进度条是空的：一条空槽加三个横线常驻在面板里，什么也没说。
         assert '$("#update-progress").classList.toggle("hidden"' in script
+        assert '$("#jobs-progress-body").classList.toggle("hidden", !job)' in script
+        assert '$("#jobs-cancel-task").classList.toggle("hidden", !active)' in script
+        # 日期行的"类型"列已经写了归档日期，名称下面不必再说一遍。
+        assert script.count("<small>归档日期</small>") == 0
+        assert script.count("<small>${dateEntryNote(item)}</small>") == 2
+        # 未选日期时右侧那格原来只有两行，日期清单已在内存里，汇总不用再读网盘。
+        assert '["日期范围"' in script
     finally:
         app.extensions["smsi_archive_service"].stop()
 
@@ -95,6 +108,29 @@ def test_stylesheet_keeps_focus_visible_and_steady_numbers() -> None:
     )
     assert len(widths) == 6
     assert sum(int(value) for value in widths) == 100
+
+
+def test_stylesheet_sizes_columns_by_content_not_by_screen() -> None:
+    css = (
+        Path(__file__).resolve().parents[1] / "static" / "app.css"
+    ).read_text(encoding="utf-8")
+    # 这些页面主要是宽表格：卡到 1560px 时最宽的那张（双服务器对比）会横向滚动，
+    # 说明列被截断，而屏幕两侧还空着几百像素。
+    assert "width: min(1900px, calc(100% - 40px))" in css
+    # 表单列数跟着宽度走。固定两列时，屏幕越宽"15""2"这种两位数的输入框就越长。
+    assert "grid-template-columns: repeat(auto-fill, minmax(260px, 1fr))" in css
+    # 跨两列的前提是有两列：窗口窄到只剩一列时必须收回，否则会撑出一列把行挤宽。
+    assert ".span-2 { grid-column: auto; }" in css
+    assert "@media (min-width: 900px) { .span-2 { grid-column: span 2; } }" in css
+    assert ".form-grid.one-column { grid-template-columns: 1fr; max-width: 420px; }" in css
+    # 采集服务器面板不能写死列数：三列装两台会空出三分之一，还多一条到不了边的竖线。
+    assert ".profile-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }" in css
+    assert ".profile-row:last-child { border-right: 0; }" in css
+    assert "nth-child(3n)" not in css
+    # 对比表最后一列是一句话，不是一个值；不让它换行，整张表就得横向滚动。
+    assert "#comparisons-body td:last-child { min-width: 260px; white-space: normal; }" in css
+    # 计数徽章和标题排在一起，不再被推到面板另一端。
+    assert ".heading-title { display: flex;" in css
 
 
 def test_login_and_csrf_protection(tmp_path) -> None:

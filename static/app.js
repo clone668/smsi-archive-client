@@ -288,7 +288,14 @@
     $(nodes.eta).textContent = `剩余 ${live.eta_seconds != null ? durationText(live.eta_seconds) : "--"}`;
     $(nodes.concurrency).textContent = `并发 ${live.active_transfers != null ? `${live.active_transfers}/${live.download_workers || "--"}` : "--"}`;
     $(nodes.limit).textContent = `限速 ${live.bandwidth_limit || "不限速"}`;
-    if (prefix === "jobs") $("#jobs-cancel-task").disabled = !active;
+    if (prefix === "jobs") {
+      // 总览 hides this whole band when nothing runs; 任务 kept an empty bar and six
+      // dashes at the top of the page.  The heading already says 空闲 - the numbers
+      // below it only mean something while a task exists.
+      $("#jobs-progress-body").classList.toggle("hidden", !job);
+      $("#jobs-cancel-task").classList.toggle("hidden", !active);
+      $("#jobs-cancel-task").disabled = !active;
+    }
   }
 
   function renderJobs() {
@@ -959,16 +966,24 @@
           ? ["待检查", ""]
           : statusMap[item.status] || [item.remote ? "可读取" : "未知", item.remote ? "good" : ""];
         const localInfo = item.local ? ["本地已存在", "good"] : item.partial ? ["暂存中", "warn"] : ["未下载", ""];
-        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>归档日期</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>归档日期</td><td>${bytes(item.bytes_total)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${localInfo[1]}">${localInfo[0]}</span></td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td></tr>`;
+        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>${dateEntryNote(item)}</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>归档日期</td><td>${bytes(item.bytes_total)}</td><td>${Number(item.row_count || 0).toLocaleString("zh-CN")}</td><td><span class="state-pill ${localInfo[1]}">${localInfo[0]}</span></td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td></tr>`;
       }).join("");
     } else {
       body.innerHTML = dates.map(item => {
         const location = item.local && item.partial ? "已验证 + 暂存" : item.local ? "已验证目录" : "暂存目录";
         const stateInfo = statusMap[item.status] || [item.status || "未知", ""];
-        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>归档日期</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${location}</td><td>${bytes(item.bytes_total)}</td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td><td>${timeText(item.updated_at)}</td></tr>`;
+        return `<tr class="directory-row"><td><button class="date-link folder-link" data-date="${escapeHtml(item.archive_date)}"><span class="file-icon folder">${icon("folder")}</span><span class="file-entry-label"><strong>${escapeHtml(item.archive_date)}</strong><small>${dateEntryNote(item)}</small></span><span class="file-chevron">${icon("chevron")}</span></button></td><td>${location}</td><td>${bytes(item.bytes_total)}</td><td><span class="state-pill ${stateInfo[1]}">${stateInfo[0]}</span></td><td>${timeText(item.updated_at)}</td></tr>`;
       }).join("");
     }
     $$(".date-link", body).forEach(button => button.addEventListener("click", () => selectFileDate(scope, button.dataset.date || "")));
+  }
+
+  // Every row in a date list is a date, and the type column already says so, so a
+  // second "归档日期" under each name filled 34 rows with one word.  The object
+  // count is the number you actually want before opening a date.
+  function dateEntryNote(item) {
+    const objects = Number(item.object_count || 0);
+    return objects > 0 ? `${objects.toLocaleString("zh-CN")} 个对象` : "归档日期";
   }
 
   function renderLocationSummary(scope) {
@@ -1011,7 +1026,24 @@
     const result = browserState.currentResult;
     const root = $(`#${scope}-inspector`);
     if (!browserState.date) {
-      root.innerHTML = `<div class="inspector-hero"><span class="file-icon folder">${icon("calendar")}</span><strong>全部归档</strong><small>${browserState.dates.length} 个日期</small></div>${inspectorFields([["位置", scope === "remote" ? "Google Drive" : "本地归档"], ["采集服务器", $(`#${scope}-profile`).selectedOptions[0]?.textContent || "--"]])}`;
+      // 这一格之前只有"位置"和"采集服务器"两行，剩下大半是空白。日期清单已经在内存里，
+      // 汇总一遍不用再访问网盘，就能回答"一共多少、齐不齐"。
+      const dates = browserState.dates;
+      const fields = [
+        ["位置", scope === "remote" ? "Google Drive" : "本地归档"],
+        ["采集服务器", $(`#${scope}-profile`).selectedOptions[0]?.textContent || "--"],
+        ["日期范围", dates.length ? `${dates.at(-1).archive_date} ~ ${dates[0].archive_date}` : "--"],
+        ["数据量", bytes(dates.reduce((sum, item) => sum + Number(item.bytes_total || 0), 0))],
+      ];
+      const staged = dates.filter(item => item.partial).length;
+      if (scope === "remote") {
+        fields.push(
+          ["本地已存在", `${dates.filter(item => item.local).length} / ${dates.length} 个日期`],
+          ["未下载", `${dates.filter(item => !item.local && !item.partial).length} 个日期`],
+        );
+      }
+      if (staged) fields.push(["暂存中", `${staged} 个日期`]);
+      root.innerHTML = `<div class="inspector-hero"><span class="file-icon folder">${icon("calendar")}</span><strong>全部归档</strong><small>${dates.length} 个日期</small></div>${inspectorFields(fields)}`;
       return;
     }
     if (!item) {
