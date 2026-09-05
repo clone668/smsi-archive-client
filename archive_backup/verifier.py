@@ -68,7 +68,29 @@ def update_content_digest(digest: Any, row: Mapping[str, Any]) -> None:
     digest.update(payload)
 
 
+def reader_version() -> str:
+    """The pyarrow that computes the fingerprints below.
+
+    Named in the mismatch messages: those two numbers are derived from the
+    reader, so the reader is part of the finding.
+    """
+    try:
+        import pyarrow
+
+        return str(pyarrow.__version__)
+    except Exception:  # pragma: no cover - only when pyarrow is unusable
+        return "未知版本"
+
+
 def verify_parquet(path: Path, item: Mapping[str, Any], cancel: Event | None = None) -> dict[str, Any]:
+    """Deep-verify one Parquet object against its manifest entry.
+
+    Precondition: the caller has already confirmed the file's SHA-256 against
+    the manifest.  That is what lets the two fingerprint mismatches below say
+    the copy is not damaged - once the bytes match, the schema and the row
+    content are by definition the producer's, so a number we cannot reproduce
+    is a statement about the reader, not about the archive.
+    """
     raise_if_cancelled(cancel)
     try:
         import pyarrow.parquet as pq
@@ -83,7 +105,11 @@ def verify_parquet(path: Path, item: Mapping[str, Any], cancel: Event | None = N
         schema_sha256 = hashlib.sha256(str(parquet.schema_arrow).encode("utf-8")).hexdigest()
         expected_schema = str(item.get("schema_sha256") or "")
         if expected_schema and schema_sha256 != expected_schema:
-            raise RuntimeError(f"Parquet schema 不一致: {path.name}")
+            raise RuntimeError(
+                f"无法复现采集端的 Parquet schema 摘要: {path.name}"
+                f"（文件字节已与 manifest 核对一致，副本没有损坏；"
+                f"通常是本机 pyarrow 版本与采集端不同，本机为 {reader_version()}）"
+            )
         content_sha256: str | None = None
         if item.get("kind") == "business":
             expected_content = str(item.get("content_sha256") or "")
@@ -98,7 +124,11 @@ def verify_parquet(path: Path, item: Mapping[str, Any], cancel: Event | None = N
                     update_content_digest(digest, row)
             content_sha256 = digest.hexdigest()
             if content_sha256 != expected_content:
-                raise RuntimeError(f"业务内容摘要不一致: {path.name}")
+                raise RuntimeError(
+                    f"无法复现采集端的业务内容摘要: {path.name}"
+                    f"（文件字节已与 manifest 核对一致，副本没有损坏；"
+                    f"通常是本机 pyarrow 版本与采集端不同，本机为 {reader_version()}）"
+                )
     finally:
         parquet.close()
     return {"row_count": row_count, "schema_sha256": schema_sha256, "content_sha256": content_sha256}
