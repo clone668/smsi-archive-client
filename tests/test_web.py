@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from archive_backup import __version__
@@ -65,8 +66,35 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert 'object_checksum_difference: "校验和"' in script
         assert '? "轻微差异" : baseLabel' in script
         assert "item.data_status || item.status ||" in script
+        # 空闲时那块进度条是空的：一条空槽加三个横线常驻在面板里，什么也没说。
+        assert '$("#update-progress").classList.toggle("hidden"' in script
     finally:
         app.extensions["smsi_archive_service"].stop()
+
+
+def test_stylesheet_keeps_focus_visible_and_steady_numbers() -> None:
+    css = (
+        Path(__file__).resolve().parents[1] / "static" / "app.css"
+    ).read_text(encoding="utf-8")
+    # 导航项、标签页、目录项都是 border: 0 的按钮，浏览器默认焦点框在深色侧栏上几乎
+    # 看不见；统一给一圈焦点环，输入框保留自己那套边框加光晕，不叠两层。
+    assert ":focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }" in css
+    assert ".sidebar :focus-visible" in css
+    assert "input:focus-visible, select:focus-visible { outline: none; }" in css
+    # 开关的真实复选框是隐藏的，焦点必须转到那个滑块图形上。
+    assert ".switch-row input:focus-visible + .switch" in css
+    # 百分比、速度、剩余时间每 0.75~2 秒重画一次，等宽数字才不会让整行左右抖动。
+    assert "font-variant-numeric: tabular-nums" in css
+    # 侧栏宽度每个断点只写一次，浮动传输窗读同一个值，不会各写一遍而错位。
+    assert "left: var(--sidebar-width)" in css
+    assert css.count("236px") == 1
+    assert css.count("196px") == 1
+    # 远端文件表六列宽度必须正好 100%，否则最后一列（摘要）放不下 12 位哈希。
+    widths = re.findall(
+        r"^\.file-table th:[a-z-]+(?:\(\d+\))? \{ width: (\d+)%; \}$", css, re.M
+    )
+    assert len(widths) == 6
+    assert sum(int(value) for value in widths) == 100
 
 
 def test_login_and_csrf_protection(tmp_path) -> None:

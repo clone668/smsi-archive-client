@@ -307,7 +307,7 @@
       const values = progressValues(job, job.id === active?.id ? progress : {});
       const location = [profiles[job.profile_id] || job.profile_id, job.archive_date].filter(Boolean).join(" · ") || "全部采集服务器";
       const detail = job.error || job.detail || "";
-      return `<tr><td><div class="job-cell"><strong>${escapeHtml(jobLabel(job))}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></div></td><td>${escapeHtml(location)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${values.objects ? `${values.objectsDone}/${values.objects}` : "--"}</td><td>${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}</td><td>${timeText(job.updated_at)}</td></tr>`;
+      return `<tr><td><div class="job-cell"><strong>${escapeHtml(jobLabel(job))}</strong><small${job.error ? ' class="bad"' : ""} title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></div></td><td>${escapeHtml(location)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span></td><td>${values.objects ? `${values.objectsDone}/${values.objects}` : "--"}</td><td>${values.total ? `${bytes(values.done)} / ${bytes(values.total)}` : "--"}</td><td>${timeText(job.updated_at)}</td></tr>`;
     }).join("");
   }
 
@@ -624,6 +624,11 @@
     $("#restart-update").title = !updates.helper_available ? "更新助手不可用"
       : archiveBusy ? "安全暂停当前归档任务并重启当前版本"
       : "重启当前运行版本，不会切换版本";
+
+    // An empty bar above three dashes was a permanent fixture that said nothing.
+    // The progress block earns its space only while something is running, is
+    // downloaded and waiting, or failed.
+    $("#update-progress").classList.toggle("hidden", !(state.updateBusy || active || staged || phase === "failed"));
 
     const percent = Number.isFinite(Number(operation.percent)) ? Math.max(0, Math.min(100, Number(operation.percent))) : null;
     const track = $("#update-progress-track");
