@@ -72,10 +72,16 @@ chmod 0644 /etc/systemd/system/smsi-archive-client.service
 install -m 0755 "${SOURCE_DIR}/deploy/smsi-archive-client-updater.py" /usr/local/libexec/smsi-archive-client-updater.py
 install -m 0644 "${SOURCE_DIR}/deploy/${UPDATER_UNIT}" "/etc/systemd/system/${UPDATER_UNIT}"
 systemctl daemon-reload
-systemctl enable --now smsi-archive-client.service
-systemctl enable --now "${UPDATER_UNIT}"
+systemctl enable smsi-archive-client.service
+systemctl enable "${UPDATER_UNIT}"
+# 必须显式 restart。enable --now 对已经在运行的单元什么都不做，那会把新代码留在
+# 磁盘上、让旧进程继续跑，重装看起来成功但界面还是旧的。先换更新助手（它才有权限
+# 改安装目录），再换客户端本体。
+systemctl restart "${UPDATER_UNIT}"
+systemctl restart smsi-archive-client.service
 
 echo
 echo "安装完成：http://<Ubuntu局域网IP>:8788"
+echo "已安装版本：$(cat "${INSTALL_DIR}/.smsi-release" 2>/dev/null || echo 未知)"
 echo "初始密码：sudo cat ${STATE_DIR}/initial-password.txt"
 echo "rclone 配置：sudo -u ${SERVICE_USER} rclone --config ${STATE_DIR}/rclone.conf config"
