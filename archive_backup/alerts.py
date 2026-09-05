@@ -8,6 +8,11 @@ here:
 * *silence* - a client that has stopped checking records no events at all,
   which is the one failure event-driven alerting can never catch by itself.
 
+Checks run on a timer, so the same fault is recorded again on every pass.  A
+repeat of a fault already reported is counted rather than sent again, because
+an alert channel that reports one broken afternoon a hundred times is a channel
+the user switches off.
+
 Nothing here is on the data path: an alert that cannot be delivered is retried
 on the next poll and never fails a sync, a download or a verification.
 """
@@ -32,6 +37,8 @@ LEVEL_MARKS = {"info": "·", "warning": "!", "error": "X"}
 LEVEL_LABELS = {"info": "信息", "warning": "警告", "error": "错误"}
 MAX_EVENTS_PER_MESSAGE = 8
 MAX_MESSAGE_CHARS = 3500  # Telegram rejects anything past 4096.
+REPEAT_SUPPRESS_SECONDS = 3600
+MAX_TRACKED_FAULTS = 40
 REQUEST_TIMEOUT_SECONDS = 10
 TELEGRAM_ENDPOINT = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -40,6 +47,20 @@ Sender = Callable[[str, str, str], None]
 
 def level_rank(level: str) -> int:
     return LEVEL_RANK.get(str(level or "").strip().lower(), LEVEL_RANK["info"])
+
+
+def fault_fingerprint(event: Mapping[str, Any]) -> str:
+    """Identify "the same fault happening again", ignoring what varies.
+
+    The archive date is deliberately excluded: a backlog run failing on thirty
+    days is one fault reported thirty times, not thirty faults.  The profile is
+    included, because a second collector failing really is news.
+    """
+    return "|".join((
+        str(event.get("level") or "").strip().lower(),
+        str(event.get("profile_id") or "").strip(),
+        str(event.get("event") or "").strip()[:120],
+    ))
 
 
 def forwarded_levels(minimum: str) -> list[str]:
@@ -185,10 +206,50 @@ class AlertNotifier:
             lines.append(f"{mark} {when} {item.get('event') or ''}".rstrip())
             if scope:
                 lines.append(f"    {scope}")
+            repeats = int(item.get("repeat_count") or 0)
+            if repeats:
+                lines.append(f"    期间重复 {repeats} 次")
             detail = str(item.get("detail") or "").strip().replace("\n", " ")
             if detail:
                 lines.append(f"    {detail[:200]}")
         return lines
+
+    def _partition_events(
+        self, events: Sequence[Mapping[str, Any]], state: Mapping[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Separate news from a fault that has already been reported.
+
+        Returns the events worth sending and the fault history they imply; the
+        caller stores that history only after a successful send, so a delivery
+        failure cannot mark a fault as reported when it was not.  A suppressed
+        repeat is still counted, and the count travels with the next message for
+        that fault so a long outage never looks like a single blip.
+        """
+        history: dict[str, Any] = {
+            key: dict(value)
+            for key, value in (state.get("faults") or {}).items()
+            if isinstance(value, Mapping)
+        }
+        forwarded: list[dict[str, Any]] = []
+        for item in events:
+            key = fault_fingerprint(item)
+            record = history.setdefault(key, {"at": "", "count": 0})
+            reported = parse_utc(str(record.get("at") or ""))
+            if reported is not None and self._now() - reported < timedelta(
+                seconds=REPEAT_SUPPRESS_SECONDS
+            ):
+                record["count"] = int(record.get("count") or 0) + 1
+                continue
+            entry = dict(item)
+            entry["repeat_count"] = int(record.get("count") or 0)
+            forwarded.append(entry)
+            record["at"] = self._stamp()
+            record["count"] = 0
+        if len(history) > MAX_TRACKED_FAULTS:
+            # Bounded on purpose: this lives in the runtime state row.
+            oldest_first = sorted(history.items(), key=lambda pair: str(pair[1].get("at") or ""))
+            history = dict(oldest_first[-MAX_TRACKED_FAULTS:])
+        return forwarded, history
 
     def _silence_lines(
         self, stale_hours: int, state: dict[str, Any]
@@ -245,16 +306,32 @@ class AlertNotifier:
         self, config: Any, token: str, chat_id: str, state: dict[str, Any]
     ) -> dict[str, Any]:
         watermark = int(state.get("last_event_id") or 0)
+        levels = forwarded_levels(config.alert_min_level)
         events = self.database.events_since(
-            watermark,
-            forwarded_levels(config.alert_min_level),
-            limit=MAX_EVENTS_PER_MESSAGE,
+            watermark, levels, limit=MAX_EVENTS_PER_MESSAGE
         )
+        forwarded, faults = self._partition_events(events, state)
         silence_lines, silence_flag = self._silence_lines(
             int(config.alert_stale_hours), state
         )
-        lines = silence_lines + self._event_lines(events)
+        lines = silence_lines + self._event_lines(forwarded)
         if not lines:
+            if events:
+                # Every fetched event was a repeat of something already
+                # reported, so the cursor moves past them - but never past
+                # events this pass has not looked at.
+                state["last_event_id"] = max(int(item.get("id") or 0) for item in events)
+                state["faults"] = faults
+                state["pending_events"] = bool(
+                    self.database.events_since(
+                        int(state["last_event_id"]), levels, limit=1
+                    )
+                )
+                self._save_state(state)
+                return {
+                    "ok": True, "sent": 0, "skipped": "repeats_suppressed",
+                    "suppressed": len(events),
+                }
             # Keep the cursor moving even when nothing qualified, otherwise the
             # query rescans an ever-growing tail of the event log.
             newest = self.database.max_event_id()
@@ -264,7 +341,7 @@ class AlertNotifier:
                 self._save_state(state)
             return {"ok": True, "sent": 0, "skipped": "nothing_to_report"}
         counts: dict[str, int] = {}
-        for item in events:
+        for item in forwarded:
             level = str(item.get("level") or "info")
             counts[level] = counts.get(level, 0) + 1
         parts = [
@@ -292,20 +369,19 @@ class AlertNotifier:
             return {"ok": False, "sent": 0, "error": reason}
         if events:
             state["last_event_id"] = max(int(item.get("id") or 0) for item in events)
+        state["faults"] = faults
         if silence_flag is not None:
             state["stale_alerted"] = silence_flag
         state["pending_events"] = bool(
             self.database.events_since(
-                int(state.get("last_event_id") or 0),
-                forwarded_levels(config.alert_min_level),
-                limit=1,
+                int(state.get("last_event_id") or 0), levels, limit=1
             )
         )
         state["last_sent_at"] = self._stamp()
         state["last_error"] = ""
         state["last_error_at"] = ""
         self._save_state(state)
-        return {"ok": True, "sent": len(lines), "events": len(events)}
+        return {"ok": True, "sent": len(lines), "events": len(forwarded)}
 
     def send_test(self) -> dict[str, Any]:
         """Prove the channel works now, without touching the alert cursor."""

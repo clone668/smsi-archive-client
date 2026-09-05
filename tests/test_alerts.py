@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from archive_backup.alerts import AlertNotifier, _scrub
+from archive_backup.alerts import MAX_EVENTS_PER_MESSAGE, AlertNotifier, _scrub
 from archive_backup.config import ConfigStore
 from archive_backup.database import StateDatabase
 
@@ -137,6 +137,51 @@ def test_a_fresh_client_is_not_accused_of_being_stale(tmp_path) -> None:
     clock["now"] += timedelta(hours=4)
     assert notifier.poll()["sent"]
     assert "没有成功完成归档检查" in sender.messages[0]
+
+
+def test_a_repeated_fault_is_reported_once_with_the_count_of_its_repeats(
+    tmp_path,
+) -> None:
+    """Checks run on a timer; one fault that lasts an hour is still one fault."""
+    _store, database, notifier, sender, clock = _build(tmp_path)
+    notifier.poll()
+    database.event("error", "后台任务失败", detail="rclone 复制失败")
+    assert notifier.poll()["events"] == 1
+
+    for attempt in range(3):
+        clock["now"] += timedelta(minutes=15)
+        database.event("error", "后台任务失败", detail=f"第 {attempt} 次重试失败")
+        result = notifier.poll()
+        assert result["skipped"] == "repeats_suppressed"
+        assert result["suppressed"] == 1
+    assert len(sender.messages) == 1
+
+    # The same message from a second profile is a different fault.
+    database.event("error", "后台任务失败", profile_id="collector-b")
+    assert notifier.poll()["events"] == 1
+    assert "collector-b" in sender.messages[1]
+
+    clock["now"] += timedelta(minutes=30)
+    database.event("error", "后台任务失败", detail="仍然失败")
+    assert notifier.poll()["events"] == 1
+    assert "期间重复 3 次" in sender.messages[2]
+
+
+def test_suppressed_repeats_never_hide_a_fault_further_down_the_log(tmp_path) -> None:
+    """The cursor may pass repeats, never events this pass has not read."""
+    _store, database, notifier, sender, _clock = _build(tmp_path)
+    notifier.poll()
+    database.event("error", "后台任务失败")
+    assert notifier.poll()["events"] == 1
+
+    for _ in range(MAX_EVENTS_PER_MESSAGE):
+        database.event("error", "后台任务失败")
+    database.event("error", "校验失败", detail="sha256 不一致")
+
+    assert notifier.poll()["skipped"] == "repeats_suppressed"
+    assert notifier.state()["pending_events"] is True
+    assert notifier.poll()["events"] == 1
+    assert "校验失败" in sender.messages[1]
 
 
 def test_disabled_alerting_sends_nothing(tmp_path) -> None:
