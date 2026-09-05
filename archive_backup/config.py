@@ -18,6 +18,11 @@ CONFIG_VERSION = 3
 MIN_PASSWORD_LENGTH = 6
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:$")
+# A pasted token is the single most likely alerting mistake, so its shape is
+# checked here rather than discovered as a 401 hours later.
+TELEGRAM_TOKEN_RE = re.compile(r"^\d{6,12}:[A-Za-z0-9_-]{30,64}$")
+TELEGRAM_CHAT_RE = re.compile(r"^(-?\d{1,20}|@[A-Za-z0-9_]{5,32})$")
+ALERT_LEVELS = ("warning", "error")
 
 
 def app_data_dir() -> Path:
@@ -176,6 +181,11 @@ class ClientConfig:
     bandwidth_limit: str = "20M"
     minimum_free_bytes: int = 10 * 1024 * 1024 * 1024
     auto_download: bool = True
+    alert_enabled: bool = False
+    alert_bot_token: str = ""
+    alert_chat_id: str = ""
+    alert_min_level: str = "warning"
+    alert_stale_hours: int = 6
     web_host: str = field(default_factory=default_web_host)
     web_port: int = field(default_factory=default_web_port)
     password_hash: str = ""
@@ -204,6 +214,7 @@ class ClientConfig:
             errors.append("下载并发必须为 1 至 8")
         if int(self.minimum_free_bytes) < 1024 * 1024 * 1024:
             errors.append("磁盘保留空间不能小于 1 GiB")
+        errors.extend(self._alert_errors())
         if not 1 <= int(self.web_port) <= 65535:
             errors.append("Web 端口无效")
         try:
@@ -227,10 +238,31 @@ class ClientConfig:
                     errors.append(f"{profile.profile_id}: 来源目录不能与本地目标目录重叠")
         return errors
 
+    def _alert_errors(self) -> list[str]:
+        errors: list[str] = []
+        token = self.alert_bot_token.strip()
+        chat_id = self.alert_chat_id.strip()
+        if self.alert_min_level not in ALERT_LEVELS:
+            errors.append("告警级别必须是 warning 或 error")
+        if not 1 <= int(self.alert_stale_hours) <= 168:
+            errors.append("无成功检查告警阈值必须为 1 至 168 小时")
+        if token and not TELEGRAM_TOKEN_RE.fullmatch(token):
+            errors.append("Telegram 机器人令牌格式无效")
+        if chat_id and not TELEGRAM_CHAT_RE.fullmatch(chat_id):
+            errors.append("Telegram 会话 ID 无效")
+        if self.alert_enabled and not (token and chat_id):
+            errors.append("启用告警前必须填写机器人令牌与会话 ID")
+        return errors
+
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value.pop("password_hash", None)
         value.pop("session_secret", None)
+        # The bot token is a credential.  The UI needs to know whether one is
+        # stored and which one, never the token itself.
+        token = str(value.pop("alert_bot_token", "") or "")
+        value["alert_bot_token_set"] = bool(token)
+        value["alert_bot_token_hint"] = f"…{token[-4:]}" if len(token) >= 8 else ""
         return value
 
     @classmethod
@@ -245,6 +277,11 @@ class ClientConfig:
             bandwidth_limit=str(value.get("bandwidth_limit") or "20M"),
             minimum_free_bytes=int(value.get("minimum_free_bytes") or 10 * 1024**3),
             auto_download=bool(value.get("auto_download", True)),
+            alert_enabled=bool(value.get("alert_enabled", False)),
+            alert_bot_token=str(value.get("alert_bot_token") or "").strip(),
+            alert_chat_id=str(value.get("alert_chat_id") or "").strip(),
+            alert_min_level=str(value.get("alert_min_level") or "warning").strip(),
+            alert_stale_hours=int(value.get("alert_stale_hours") or 6),
             web_host=str(value.get("web_host") or default_web_host()),
             web_port=int(value.get("web_port") or default_web_port()),
             password_hash=str(value.get("password_hash") or ""),
@@ -296,11 +333,16 @@ class ConfigStore:
 
     def update_public(self, payload: Mapping[str, Any]) -> ClientConfig:
         current = self.load()
+        supplied = dict(payload)
+        # public_dict() withholds the bot token, so an ordinary settings save
+        # would otherwise erase it.  An empty field means "keep what is stored".
+        token = str(supplied.pop("alert_bot_token", "") or "").strip()
         merged = {
             **current.public_dict(),
-            **dict(payload),
+            **supplied,
             "password_hash": current.password_hash,
             "session_secret": current.session_secret,
+            "alert_bot_token": token or current.alert_bot_token,
             "config_version": CONFIG_VERSION,
         }
         updated = ClientConfig.from_mapping(merged)

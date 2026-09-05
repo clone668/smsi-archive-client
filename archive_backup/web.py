@@ -279,6 +279,8 @@ def create_app(store: ConfigStore | None = None) -> Flask:
             "local_root", "rclone_binary", "poll_minutes", "history_days",
             "download_workers", "bandwidth_limit", "minimum_free_bytes",
             "auto_download", "web_host", "web_port", "profiles",
+            "alert_enabled", "alert_bot_token", "alert_chat_id",
+            "alert_min_level", "alert_stale_hours",
         }
         unknown = set(payload) - allowed
         if unknown:
@@ -328,7 +330,10 @@ def create_app(store: ConfigStore | None = None) -> Flask:
                 )
             except RuntimeError:
                 service.wake()
-        elif "poll_minutes" in changed:
+        elif "poll_minutes" in changed or any(
+            key.startswith("alert_") for key in payload
+        ):
+            # An alert setting must take effect now, not in fifteen minutes.
             service.wake()
         activation = {
             "rescan_started": rescan_required,
@@ -389,6 +394,14 @@ def create_app(store: ConfigStore | None = None) -> Flask:
     def api_cancel():
         service.request_cancel()
         return jsonify({"ok": True})
+
+    @app.post("/api/actions/alert-test")
+    def api_alert_test():
+        # Deliberately independent of the alert cursor: this answers "does the
+        # channel work right now", which is the only question worth a button.
+        service.notifier.send_test()
+        database.event("info", "已发送告警测试消息")
+        return jsonify({"ok": True, "alert": service.notifier.state()})
 
     @app.put("/api/password")
     def api_password():

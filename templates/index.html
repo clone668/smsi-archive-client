@@ -211,6 +211,18 @@
           </section>
 
           <section class="content-band settings-section">
+            <div class="section-heading"><div><h2>告警通知</h2><p>无人值守时把错误和"客户端已停止检查"推送到 Telegram</p></div><div class="heading-actions"><button id="test-alert" type="button" class="button secondary">发送测试</button><button id="save-alert-settings" type="button" class="button primary">保存告警设置</button></div></div>
+            <div class="form-grid">
+              <label class="switch-row span-2"><input name="alert_enabled" type="checkbox"><span class="switch"></span><span>启用告警通知</span></label>
+              <label class="span-2">机器人令牌<input name="alert_bot_token" type="password" autocomplete="off" placeholder="留空表示不修改"><small class="field-help" id="alert-token-state">尚未保存令牌。</small></label>
+              <label>会话 ID<input name="alert_chat_id" placeholder="123456789 或 @channel"></label>
+              <label>推送级别<select name="alert_min_level"><option value="warning">警告及以上</option><option value="error">仅错误</option></select></label>
+              <label>多久没有成功检查就告警（小时）<input name="alert_stale_hours" type="number" min="1" max="168"></label>
+            </div>
+            <p id="alert-health" class="update-detail">告警通道状态未知。</p>
+          </section>
+
+          <section class="content-band settings-section">
             <div class="section-heading"><div><h2>采集服务器配置</h2><p>已有归档状态的配置 ID 与 Collector ID 将被锁定</p></div><div class="heading-actions"><button id="add-profile" type="button" class="button secondary">添加</button><button id="save-profile-settings" type="button" class="button primary">保存来源</button></div></div>
             <div id="profile-editor" class="profile-editor"></div>
           </section>

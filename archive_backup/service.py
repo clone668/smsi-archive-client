@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .alerts import LAST_SUCCESS_KEY, AlertNotifier
 from .config import ConfigStore
 from .database import StateDatabase, utc_now
 from .manager import ArchiveManager
@@ -19,6 +20,7 @@ class ArchiveService:
     def __init__(self, store: ConfigStore, database: StateDatabase) -> None:
         self.store = store
         self.database = database
+        self.notifier = AlertNotifier(store, database)
         self._condition = threading.Condition()
         self._persistence_lock = threading.Lock()
         self._stop = threading.Event()
@@ -183,6 +185,11 @@ class ArchiveService:
             self.database.job(current_job_id)
             if current_job_id
             else self.database.active_job()
+        )
+        state["alert"] = self.notifier.state()
+        state["alert_enabled"] = config.alert_enabled
+        state["last_successful_scan_at"] = str(
+            self.database.get_runtime(LAST_SUCCESS_KEY, "") or ""
         )
         return state
 
@@ -412,6 +419,10 @@ class ArchiveService:
                         finished_at=utc_now(),
                     )
                     self.database.finish_job_items(job_id, "completed")
+                    if action in {"scan", "scan_download"}:
+                        # The silence alarm measures this: a client that stops
+                        # checking emits no events to alert on.
+                        self.notifier.record_success()
                     job = self.database.job(job_id) or {}
                     if (
                         job.get("requested_by") in {"automatic", "config"}
@@ -486,4 +497,12 @@ class ArchiveService:
                         last_finished_at=utc_now(),
                         next_scan_at=next_scan.isoformat().replace("+00:00", "Z"),
                     )
+            self._poll_alerts()
             self._wait_for_work(interval)
+
+    def _poll_alerts(self) -> None:
+        """Alerting is best-effort by construction and never fails the loop."""
+        try:
+            self.notifier.poll()
+        except Exception:  # noqa: BLE001 - the archive must keep running
+            pass

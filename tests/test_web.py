@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from archive_backup import __version__
 from archive_backup.config import ConfigStore
 from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.web import create_app
@@ -37,7 +38,7 @@ def test_overview_is_the_default_workspace(tmp_path) -> None:
         assert '<span>需要处理</span>' in page
         assert '<th>数据对比</th>' in page
         assert '<th>归档日数据质量</th>' in page
-        assert "归档中心 · v4.4.0" in page
+        assert f"归档中心 · v{__version__}" in page
         script = (
             Path(__file__).resolve().parents[1] / "static" / "app.js"
         ).read_text(encoding="utf-8")
@@ -108,6 +109,66 @@ def test_config_activation_does_not_scan_for_resource_only_changes(tmp_path) -> 
         assert calls == []
     finally:
         service.request_scan = original_request_scan
+        service.stop()
+
+
+def test_alert_settings_are_accepted_and_never_publish_the_token(tmp_path) -> None:
+    """The token must reach the config file and nothing else."""
+    token = "123456789:AAEabcdefghijklmnopqrstuvwxyz0123456"
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    woke: list[bool] = []
+    original_wake = service.wake
+    service.wake = lambda: woke.append(True)
+    try:
+        csrf = _login(client, store)
+        response = client.put(
+            "/api/config",
+            json={
+                "alert_bot_token": token,
+                "alert_chat_id": "-1001234567890",
+                "alert_min_level": "error",
+                "alert_stale_hours": 12,
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert token not in body
+        config = response.get_json()["config"]
+        assert "alert_bot_token" not in config
+        assert config["alert_bot_token_set"] is True
+        assert config["alert_bot_token_hint"] == "…3456"
+        assert config["alert_min_level"] == "error"
+        assert config["alert_stale_hours"] == 12
+        # An alert setting is useless if it waits for the next poll interval.
+        assert woke == [True]
+        assert store.load().alert_bot_token == token
+    finally:
+        service.wake = original_wake
+        service.stop()
+
+
+def test_alert_test_endpoint_explains_missing_credentials(tmp_path) -> None:
+    """The test button must fail with an instruction, not a stack trace."""
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    app = create_app(store)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    service = app.extensions["smsi_archive_service"]
+    try:
+        csrf = _login(client, store)
+        response = client.post(
+            "/api/actions/alert-test", headers={"X-CSRF-Token": csrf}
+        )
+        assert response.status_code == 409
+        assert "请先填写" in response.get_json()["error"]
+    finally:
         service.stop()
 
 

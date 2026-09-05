@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 def utc_now() -> str:
@@ -517,6 +517,28 @@ class StateDatabase:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (bounded,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def max_event_id(self) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT MAX(id) AS newest FROM events").fetchone()
+        return int((row["newest"] if row else 0) or 0)
+
+    def events_since(
+        self, last_id: int, levels: Sequence[str], limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Events newer than a cursor, oldest first, for outbound alerting."""
+        wanted = [str(level) for level in levels]
+        if not wanted:
+            return []
+        bounded = max(1, min(int(limit), 50))
+        placeholders = ",".join("?" for _ in wanted)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM events WHERE id > ? AND level IN ({placeholders}) "
+                "ORDER BY id LIMIT ?",
+                (int(last_id), *wanted, bounded),
             ).fetchall()
         return [dict(row) for row in rows]
 

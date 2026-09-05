@@ -479,6 +479,7 @@
     renderDays();
     renderEvents();
     renderJobs();
+    renderAlertHealth();
     updateRemoteDownloadAction();
   }
 
@@ -1145,7 +1146,37 @@
     }
     form.elements.minimum_free_gib.value = Math.round(Number(config.minimum_free_bytes) / 1073741824);
     form.elements.auto_download.checked = !!config.auto_download;
+    form.elements.alert_enabled.checked = !!config.alert_enabled;
+    form.elements.alert_chat_id.value = config.alert_chat_id ?? "";
+    form.elements.alert_min_level.value = config.alert_min_level || "warning";
+    form.elements.alert_stale_hours.value = Number(config.alert_stale_hours || 6);
+    form.elements.alert_bot_token.value = "";
+    $("#alert-token-state").textContent = config.alert_bot_token_set
+      ? `已保存令牌 ${config.alert_bot_token_hint || ""}，留空表示不修改。`
+      : "尚未保存令牌。";
     renderProfileEditor();
+  }
+
+  function renderAlertHealth() {
+    const node = $("#alert-health");
+    if (!node) return;
+    const status = state.runtime || {};
+    const alert = status.alert || {};
+    // Enablement comes from the saved config so the line is right the moment a
+    // save returns; the delivery details below are observations, so they come
+    // from the running service and appear on the next refresh.
+    if (!(state.config || {}).alert_enabled) {
+      node.textContent = "告警通知未启用，失败只能在本页面看到。";
+      return;
+    }
+    const parts = [];
+    if (alert.last_error) parts.push(`最近一次发送失败：${alert.last_error}`);
+    else if (alert.last_sent_at) parts.push(`最近推送 ${timeText(alert.last_sent_at)}`);
+    else parts.push("已启用，暂无需要推送的内容");
+    if (alert.stale_alerted) parts.push("当前处于「已停止检查」告警状态");
+    if (alert.pending_events) parts.push("仍有待推送内容");
+    if (status.last_successful_scan_at) parts.push(`上次成功检查 ${timeText(status.last_successful_scan_at)}`);
+    node.textContent = parts.join("；") + "。";
   }
 
   function collectProfiles() {
@@ -1172,6 +1203,19 @@
       auto_download: form.elements.auto_download.checked,
     };
     if (section === "profiles") return { profiles: collectProfiles() };
+    if (section === "alerts") {
+      const payload = {
+        alert_enabled: form.elements.alert_enabled.checked,
+        alert_chat_id: form.elements.alert_chat_id.value.trim(),
+        alert_min_level: form.elements.alert_min_level.value,
+        alert_stale_hours: Number(form.elements.alert_stale_hours.value),
+      };
+      // An empty token field means "keep the stored one"; sending "" would
+      // otherwise wipe a working credential on every unrelated save.
+      const token = form.elements.alert_bot_token.value.trim();
+      if (token) payload.alert_bot_token = token;
+      return payload;
+    }
     return {
       web_host: form.elements.web_host.value.trim(),
       web_port: Number(form.elements.web_port.value),
@@ -1313,6 +1357,21 @@
   $("#save-runtime-settings").addEventListener("click", () => saveSettings("runtime"));
   $("#save-profile-settings").addEventListener("click", () => saveSettings("profiles"));
   $("#save-web-settings").addEventListener("click", () => saveSettings("web"));
+  $("#save-alert-settings").addEventListener("click", async () => {
+    await saveSettings("alerts");
+    renderAlertHealth();
+  });
+  $("#test-alert").addEventListener("click", async () => {
+    const button = $("#test-alert");
+    button.disabled = true;
+    try {
+      await api("/api/actions/alert-test", { method: "POST" });
+      toast("测试消息已发送，请查看 Telegram");
+      await refresh();
+    }
+    catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; }
+  });
   $("#add-profile").addEventListener("click", () => {
     const used = new Set(state.config.profiles.map(item => item.profile_id)); let counter = 1; while (used.has(`collector-${counter}`)) counter += 1;
     state.config.profiles.push({ profile_id: `collector-${counter}`, display_name: `采集服务器 ${counter}`, collector_id: `collector-${counter}`, enabled: true, source_type: "google_drive", drive_remote: "gdrive:", drive_prefix: "smsi/v3", verified_source_root: "" }); renderProfileEditor();
