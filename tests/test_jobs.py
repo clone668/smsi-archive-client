@@ -358,3 +358,28 @@ def test_safe_stop_queues_running_job_for_resume(tmp_path) -> None:
     assert recovered["cancel_requested"] == 0
     assert day["status"] == "interrupted"
     assert service._thread is None
+
+
+def test_safe_stop_during_supplement_preserves_verified_native_day(tmp_path) -> None:
+    store = ConfigStore(tmp_path / "state")
+    store.load()
+    database = StateDatabase(store.root / "state.sqlite3")
+    service = ArchiveService(store, database)
+    executing = threading.Event()
+
+    def execute(job_id, _action, arguments):
+        database.upsert_day(arguments["profile_id"], arguments["archive_date"],
+            status="verified", dependency_summary='{"state":"ready"}')
+        service._update_progress(job_id, {"phase": "supplement", "supplement": True,
+            "profile_id": arguments["profile_id"], "archive_date": arguments["archive_date"]})
+        executing.set()
+        assert service._cancel.wait(timeout=2)
+        raise OperationCancelled("补充包同步已取消")
+
+    service._execute = execute
+    job = service.request_download("collector-a", "2026-08-09")
+    service.start()
+    assert executing.wait(timeout=2)
+    assert service.stop(timeout=2) is True
+    assert database.job(job["id"])["status"] == "queued"
+    assert database.day("collector-a", "2026-08-09")["status"] == "verified"

@@ -14,6 +14,8 @@ from typing import Any, Callable, Mapping
 from .config import ClientConfig, ProfileConfig
 from .comparison import build_archive_comparisons
 from .database import StateDatabase
+from .dependencies import DependencyReceiver
+from .dependency_source import DependencySource
 from .protocol import (
     DATE_RE,
     RUNTIME_REPORT_CONTRACT,
@@ -1541,6 +1543,7 @@ class ArchiveManager:
                 f"manifest_audit_last_attempt:{profile.profile_id}",
                 self._utc_now(),
             )
+        dependency_result = self._scan_dependencies(profile, source, download=download)
         return {
             "profile_id": profile.profile_id,
             "dates": len(dates),
@@ -1548,10 +1551,79 @@ class ArchiveManager:
             "skipped_verified": max(0, discovered - len(dates)),
             "manifest_audits": len(audit_dates),
             "completed": completed,
-            "failed": failed,
-            "material": material,
+            "failed": failed + dependency_result["failed"],
+            "material": material or dependency_result["material"],
+            "supplements_completed": dependency_result["completed"],
             "stale_removed": stale_removed,
         }
+
+    def _scan_dependencies(self, profile, source, *, download: bool, only_date: str = "") -> dict[str, Any]:
+        result = {"failed": 0, "completed": 0, "material": False}
+        self._emit_progress({"phase": "supplement", "supplement": True,
+            "profile_id": profile.profile_id, "archive_date": only_date,
+            "current_object": "检查补充包发布记录"})
+        rows = [row for row in self.database.profile_days(profile.profile_id)
+                if not only_date or row["archive_date"] == only_date]
+        receiver = DependencyReceiver(self.profile_root(profile), profile.collector_id,
+            DependencySource(source, self.config, self.cancel),
+            checkpoint=lambda: raise_if_cancelled(self.cancel),
+            minimum_free_bytes=self.config.minimum_free_bytes,
+            workers=self.config.download_workers,
+            require_upstream_receipt=profile.source_type == "verified_directory")
+        try:
+            entries = receiver.discover()
+        except OperationCancelled:
+            raise
+        except Exception as exc:
+            entries = {}
+            discovery_error = str(exc)
+            if not rows:
+                result["failed"] += 1
+                self.database.event("error", "补充包发布记录读取失败",
+                    profile_id=profile.profile_id, detail=discovery_error)
+        else:
+            discovery_error = ""
+        for row in rows:
+            day = row["archive_date"]
+            previous = row.get("dependency_summary") or {}
+            entry = entries.get((day, row.get("manifest_sha256")))
+            summary = {"state": "unpublished"}
+            try:
+                raise_if_cancelled(self.cancel)
+                if discovery_error:
+                    raise RuntimeError(discovery_error)
+                if entry:
+                    summary = receiver.inspect(entry)
+                    if row["status"] != "verified":
+                        summary["state"] = "waiting_native"
+                    elif download and summary["state"] != "verified":
+                        receiver.progress = lambda done, total, key: self._emit_progress({
+                            "phase": "supplement", "profile_id": profile.profile_id,
+                            "archive_date": day, "supplement": True, "bytes_total": total,
+                            "bytes_done": done, "bytes_transferred": done,
+                            "current_object": "补充包 / " + key.rsplit("/", 1)[-1],
+                        })
+                        summary = receiver.sync(entry)
+                        result["completed"] += 1
+                        result["material"] = True
+                elif any(identity[0] == day for identity in entries):
+                    raise RuntimeError("补充包绑定的原日包版本与本地不同，需要核对")
+            except OperationCancelled:
+                summary = {**summary, "state": "cancelled"}
+                self.database.upsert_day(profile.profile_id, day, status=row["status"],
+                    dependency_summary=json.dumps(summary, ensure_ascii=False))
+                raise
+            except Exception as exc:
+                summary = {**(entry or {}), "state": "error", "error": str(exc)}
+                result["failed"] += 1
+                if previous != summary:
+                    self.database.event("error", "补充包处理失败", profile_id=profile.profile_id,
+                        archive_date=day, detail=str(exc))
+            summary.pop("downloaded_bytes", None)
+            if previous != summary:
+                self.database.upsert_day(profile.profile_id, day, status=row["status"],
+                    dependency_summary=json.dumps(summary, ensure_ascii=False))
+        return result
 
     def scan_profile(
         self,
@@ -1607,6 +1679,9 @@ class ArchiveManager:
             row = self.database.day(profile_id, archive_date) or {}
             detail = str(row.get("detail") or row.get("error") or "远端归档尚不可下载")
             raise RuntimeError(f"归档当前不可下载：{detail}")
+        supplements = self._scan_dependencies(profile, source, download=True, only_date=archive_date)
+        if supplements["failed"]:
+            raise RuntimeError("原日包已验证，补充包处理失败；详情见该日补充包状态")
         self.refresh_comparisons()
         return result
 
@@ -1796,5 +1871,24 @@ class ArchiveManager:
             error="",
         )
         self.database.event("info", "本地归档重新恢复验证完成", profile_id=profile_id, archive_date=archive_date)
+        self._emit_progress({"phase": "supplement", "supplement": True,
+            "profile_id": profile_id, "archive_date": archive_date,
+            "current_object": "重新校验本地补充包"})
+        receiver = DependencyReceiver(self.profile_root(profile), profile.collector_id, None,
+            checkpoint=lambda: raise_if_cancelled(self.cancel))
+        entry = receiver.discover().get((archive_date, snapshot.sha256))
+        if entry:
+            try:
+                summary = receiver.verify(entry)
+            except OperationCancelled:
+                raise
+            except Exception as exc:
+                summary = {**entry, "state": "error", "error": str(exc)}
+                self.database.upsert_day(profile_id, archive_date, status="verified",
+                    dependency_summary=json.dumps(summary, ensure_ascii=False))
+                raise RuntimeError("原日包校验通过，补充包校验失败：" + str(exc)) from exc
+            self.database.upsert_day(profile_id, archive_date, status="verified",
+                dependency_summary=json.dumps(summary, ensure_ascii=False))
+            report["dependency_summary"] = summary
         self.refresh_comparisons()
         return report

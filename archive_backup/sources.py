@@ -14,6 +14,7 @@ from typing import Callable
 
 from .config import ClientConfig, ProfileConfig
 from .verifier import OperationCancelled
+from .dependency_contract import PREFIX, MAX_JSON_BYTES, local_path
 
 
 DATE_DIR_RE = re.compile(r"^date=(20\d{2}-\d{2}-\d{2})/?$")
@@ -84,6 +85,9 @@ def resolve_rclone_binary(configured: str) -> str:
 
 class ArchiveSource(ABC):
     name: str
+
+    def list_deliveries(self) -> list[str]:
+        return []
 
     @abstractmethod
     def list_dates(self) -> set[str]:
@@ -161,6 +165,22 @@ class RcloneSource(ArchiveSource):
             raise RuntimeError(f"rclone 执行失败: {detail.strip()[:2000]}") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("rclone 请求超时") from exc
+
+    def list_deliveries(self) -> list[str]:
+        try:
+            result = self._run(
+                ["lsf", self._remote_path(PREFIX + "/deliveries"),
+                 "--files-only", "--max-depth", "1"], timeout=90,
+            )
+        except RuntimeError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, subprocess.CalledProcessError) and cause.returncode == 3:
+                return []
+            raise
+        if len(result.stdout.encode("utf-8")) > MAX_JSON_BYTES:
+            raise RuntimeError("补充包发布清单超过大小限制")
+        return [PREFIX + "/deliveries/" + name for name in result.stdout.splitlines()
+                if name and not name.endswith(".smsi-metadata.json")]
 
     def list_dates(self) -> set[str]:
         result = self._run(
@@ -282,6 +302,8 @@ class VerifiedDirectorySource(ArchiveSource):
         self.root = Path(profile.verified_source_root).expanduser().resolve()
 
     def _path(self, relative_key: str) -> Path:
+        if relative_key.startswith(PREFIX + "/"):
+            return local_path(self.root, relative_key)
         key = safe_relative_key(relative_key)
         candidate = (self.root / Path(*PurePosixPath(key).parts)).resolve()
         try:
@@ -289,6 +311,12 @@ class VerifiedDirectorySource(ArchiveSource):
         except ValueError as exc:
             raise RuntimeError("已验证目录路径越界") from exc
         return candidate
+
+    def list_deliveries(self) -> list[str]:
+        directory = local_path(self.root, PREFIX + "/deliveries")
+        if not self.root.is_dir():
+            raise RuntimeError("已验证目录不可访问")
+        return [PREFIX + "/deliveries/" + path.name for path in directory.glob("*.json")]
 
     def _day_is_verified(self, archive_date: str) -> bool:
         receipt = self._path(f"date={archive_date}/.smsi-verified.json")
@@ -338,7 +366,7 @@ class VerifiedDirectorySource(ArchiveSource):
     def read_small(self, relative_key: str, maximum_bytes: int) -> bytes | None:
         key = safe_relative_key(relative_key)
         date_match = DATE_DIR_RE.fullmatch(PurePosixPath(key).parts[0])
-        if not date_match or not self._day_is_verified(date_match.group(1)):
+        if not key.startswith(PREFIX + "/") and (not date_match or not self._day_is_verified(date_match.group(1))):
             return None
         path = self._path(key)
         if not path.is_file():
@@ -357,7 +385,7 @@ class VerifiedDirectorySource(ArchiveSource):
     ) -> int:
         key = safe_relative_key(relative_key)
         date_match = DATE_DIR_RE.fullmatch(PurePosixPath(key).parts[0])
-        if not date_match or not self._day_is_verified(date_match.group(1)):
+        if not key.startswith(PREFIX + "/") and (not date_match or not self._day_is_verified(date_match.group(1))):
             raise RuntimeError("来源日期尚未完成本地验证")
         source = self._path(key)
         if not source.is_file():

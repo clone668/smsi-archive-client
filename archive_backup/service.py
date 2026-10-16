@@ -295,6 +295,7 @@ class ArchiveService:
                     "discovering": "正在读取远端归档日期清单",
                     "scanning": "正在增量处理新归档或异常状态",
                     "downloading": "正在下载并逐对象校验",
+                    "supplement": "正在检查或下载补充包",
                     "verifying": "正在执行完整恢复校验",
                     "verified": "归档已经完整验证",
                 }.get(phase, str(self._state.get("detail") or "任务执行中")),
@@ -444,7 +445,7 @@ class ArchiveService:
                             or progress.get("archive_date")
                             or ""
                         )
-                        if profile_id and archive_date:
+                        if profile_id and archive_date and not progress.get("supplement"):
                             self.database.upsert_day(
                                 profile_id,
                                 archive_date,

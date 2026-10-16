@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from unittest.mock import patch
+import subprocess
+
+import pytest
 
 from archive_backup.config import ClientConfig, ProfileConfig
 from archive_backup.sources import RcloneDriveSource, VerifiedDirectorySource, build_source
@@ -68,3 +71,23 @@ def test_verified_directory_discovery_does_not_revalidate_historical_day(
     )
 
     assert source.discover_dates() == {"2026-08-07"}
+
+
+@patch("archive_backup.sources.resolve_rclone_binary", return_value="rclone")
+def test_drive_supplement_discovery_filters_sidecars_and_preserves_errors(_resolve, monkeypatch):
+    source = RcloneDriveSource(ClientConfig(), make_drive_profile())
+    name = "00000000000000000001-" + "a" * 64 + ".json"
+    def run(command, **kwargs):
+        assert command[2].endswith("collector=collector-a/dependencies-v1/deliveries")
+        return subprocess.CompletedProcess(command, 0, stdout=name + "\n" + name + ".smsi-metadata.json\n")
+    monkeypatch.setattr(subprocess, "run", run)
+    assert source.list_deliveries() == ["dependencies-v1/deliveries/" + name]
+    def missing(*args, **kwargs):
+        raise subprocess.CalledProcessError(3, ["rclone"], stderr="directory not found")
+    monkeypatch.setattr(subprocess, "run", missing)
+    assert source.list_deliveries() == []
+    def denied(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["rclone"], stderr="access denied")
+    monkeypatch.setattr(subprocess, "run", denied)
+    with pytest.raises(RuntimeError, match="access denied"):
+        source.list_deliveries()
