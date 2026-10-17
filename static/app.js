@@ -243,7 +243,6 @@
     if (live.phase === "discovering") return `正在读取远端归档日期清单${where}`;
     if (values.scanning) return `正在核对远端归档日期与本地状态${live.archive_date ? ` · ${live.archive_date}` : where}`;
     if (live.phase === "downloading") return "正在下载并校验对象";
-    if (live.phase === "supplement") return "正在检查或下载补充包";
     return job.detail || "等待后台任务";
   }
 
@@ -406,7 +405,6 @@
     const visibleDays = state.days.filter(item => recentDates.includes(item.archive_date));
     body.innerHTML = visibleDays.map(item => {
       const live = state.runtime?.progress;
-      const supplementLive = live?.supplement && live.profile_id === item.profile_id && live.archive_date === item.archive_date;
       const liveMatches = live && live.profile_id === item.profile_id && live.archive_date === item.archive_date && ["downloading", "verifying"].includes(live.phase);
       const objectsDone = liveMatches ? Number(live.objects_done || 0) : Number(item.objects_done || 0);
       const objectCount = liveMatches ? Number(live.object_count || item.object_count || 0) : Number(item.object_count || 0);
@@ -422,12 +420,7 @@
       ].filter(Boolean).join(" · ") : "";
       const detailText = liveDetail || item.error || item.detail || "";
       const dataText = objectCount ? `${bytesDone ? bytes(bytesDone) : "0 B"} / ${bytes(bytesTotal)}` : bytes(bytesTotal);
-      const supplement = item.dependency_summary || {};
-      const supplementLabel = supplementLive ? `正在接收补充包 · ${bytes(live.bytes_done || 0)} / ${bytes(live.bytes_total || 0)}` : supplement.state === "verified"
-        ? (supplement.dependency_status === "partial" ? "补充包已验证 · 材料仍有缺项" : "补充包已验证 · 材料齐全")
-        : ({ unpublished: "补充包尚未发布", ready: "补充包待下载", waiting_native: "补充包等待原日包验证", error: "补充包检查失败", cancelled: "补充包等待续传" }[supplement.state] || "补充包尚未检查");
-      const statusDetail = (liveDetail ? `<small class="row-progress-detail">${escapeHtml(liveDetail)}</small>` : "")
-        + `<small class="row-progress-detail" title="${escapeHtml(supplement.error || supplementLabel)}">${escapeHtml(supplementLabel)}</small>`;
+      const statusDetail = liveDetail ? `<small class="row-progress-detail">${escapeHtml(liveDetail)}</small>` : "";
       const action = `${item.status === "verified" ? `<button class="button small secondary verify-day" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}" ${taskBusy() ? "disabled" : ""}>重新校验</button>` : ""}<button class="button small quiet day-detail-toggle" data-profile="${escapeHtml(item.profile_id)}" data-date="${escapeHtml(item.archive_date)}">文件详情</button>`;
       const reportTitle = [reportState.detail, (report.top_issues || []).map(issue => issue.title || issue.code).join("；")].filter(Boolean).join(" ");
       return `<tr title="${escapeHtml(detailText)}"><td>${escapeHtml(item.archive_date)}</td><td>${escapeHtml(profiles[item.profile_id] || item.profile_id)}</td><td><span class="state-pill ${tone}">${escapeHtml(label)}</span>${statusDetail}</td><td><span class="state-pill ${reportState.tone}" title="${escapeHtml(reportTitle)}">${escapeHtml(reportState.text)}</span></td><td>${objectsDone}/${objectCount}</td><td>${dataText}</td><td>${timeText(item.updated_at)}</td><td class="row-actions">${action}</td></tr><tr class="day-detail-row hidden"><td colspan="8"><div class="day-detail-content"></div></td></tr>`;

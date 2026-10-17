@@ -136,8 +136,6 @@ class StateDatabase:
                 connection.execute(
                     "ALTER TABLE archive_days ADD COLUMN remote_checked_at TEXT NOT NULL DEFAULT ''"
                 )
-            if "dependency_summary" not in columns:
-                connection.execute("ALTER TABLE archive_days ADD COLUMN dependency_summary TEXT NOT NULL DEFAULT ''")
 
     def create_job(
         self,
@@ -415,7 +413,6 @@ class StateDatabase:
             "bytes_total",
             "bytes_done",
             "report_summary",
-            "dependency_summary",
             "remote_checked_at",
             "detail",
             "error",
@@ -481,11 +478,8 @@ class StateDatabase:
     @staticmethod
     def _decode_day(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
-        try:
-            supplement = json.loads(payload.get("dependency_summary") or "{}")
-            payload["dependency_summary"] = supplement if isinstance(supplement, dict) else {}
-        except (ValueError, TypeError):
-            payload["dependency_summary"] = {}
+        # 4.6.0 databases may retain this column; it no longer affects a day.
+        payload.pop("dependency_summary", None)
         raw_summary = payload.get("report_summary")
         if isinstance(raw_summary, str) and raw_summary:
             try:

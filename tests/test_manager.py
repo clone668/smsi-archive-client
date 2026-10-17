@@ -476,10 +476,8 @@ def test_download_reports_byte_progress_without_changing_verification_gate(tmp_p
     assert any(item["phase"] == "downloading" and item["bytes_transferred"] > 0 for item in updates)
     verified = next(item for item in updates if item["phase"] == "verified")
     assert verified["bytes_done"] == verified["bytes_total"]
-    assert updates[-1]["phase"] == "supplement"
-    assert updates[-1]["supplement"] is True
-    native_scan = [item for item in updates if item["phase"] == "scanning"][-1]
-    assert native_scan["scan_dates_done"] == native_scan["scan_dates_total"]
+    assert updates[-1]["phase"] == "scanning"
+    assert updates[-1]["scan_dates_done"] == updates[-1]["scan_dates_total"]
 
 
 def test_verified_directory_ignores_unverified_source_day(tmp_path, archive_fixture) -> None:
